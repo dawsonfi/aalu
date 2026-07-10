@@ -130,10 +130,18 @@ void ChapterHtmlSlimParser::startNewTextBlock(const BlockStyle& blockStyle) {
   if (currentTextBlock) {
     // already have a text block running and it is empty - just reuse it
     if (currentTextBlock->isEmpty()) {
+      const BlockStyle existingStyle = currentTextBlock->getBlockStyle();
+      BlockStyle incoming = blockStyle;
+      if (existingStyle.fromBrElement) {
+        // The reused empty block came from a <br> section separator: add a full blank line
+        // before the following paragraph so the scene/section break is visible.
+        const int16_t lineHeight = static_cast<int16_t>(renderer.getLineHeight(fontId) * lineCompression + 0.5f);
+        incoming.marginTop = static_cast<int16_t>(incoming.marginTop + lineHeight);
+      }
       // Merge with existing block style to accumulate CSS styling from parent block elements.
       // This handles cases like <div style="margin-bottom:2em"><h1>text</h1></div> where the
       // div's margin should be preserved, even though it has no direct text content.
-      currentTextBlock->setBlockStyle(currentTextBlock->getBlockStyle().getCombinedBlockStyle(blockStyle));
+      currentTextBlock->setBlockStyle(existingStyle.getCombinedBlockStyle(incoming));
 
       if (!pendingAnchorId.empty()) {
         anchorData.push_back({std::move(pendingAnchorId), static_cast<uint16_t>(completedPageCount)});
@@ -600,7 +608,12 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
         // flush word preceding <br/> to currentTextBlock before calling startNewTextBlock
         self->flushPartWordBuffer();
       }
-      self->startNewTextBlock(self->currentTextBlock->getBlockStyle());
+      // Tag the new block so startNewTextBlock injects a full line-height gap if it stays empty
+      // (a <br> section separator between paragraphs). If text is added before the next block
+      // opens, the block becomes non-empty and the flag has no effect (inline <br>).
+      BlockStyle brStyle = self->currentTextBlock->getBlockStyle();
+      brStyle.fromBrElement = true;
+      self->startNewTextBlock(brStyle);
     } else {
       self->currentCssStyle = cssStyle;
       self->startNewTextBlock(userAlignmentBlockStyle);

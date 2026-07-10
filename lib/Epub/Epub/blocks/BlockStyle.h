@@ -23,6 +23,11 @@ struct BlockStyle {
   bool textIndentDefined = false;  // true if text-indent was explicitly set in CSS
   bool textAlignDefined = false;   // true if text-align was explicitly set in CSS
 
+  // Set when this block was created by a <br> element, so startNewTextBlock can inject a full
+  // line-height gap when the <br> block stays empty (a section break between paragraphs).
+  // getCombinedBlockStyle returns a fresh style, so the flag never propagates to child blocks.
+  bool fromBrElement = false;
+
   // Combined horizontal insets (margin + padding)
   [[nodiscard]] int16_t leftInset() const { return marginLeft + paddingLeft; }
   [[nodiscard]] int16_t rightInset() const { return marginRight + paddingRight; }
