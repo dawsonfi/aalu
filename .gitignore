@@ -7,6 +7,10 @@ lib/I18n/I18nKeys.h
 lib/I18n/I18nStrings.h
 lib/I18n/I18nStrings.cpp
 *.generated.h
+sdkconfig.defaults
+sdkconfig.*
+managed_components
+.dummy
 .vs
 build
 **/__pycache__/

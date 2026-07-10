@@ -86,6 +86,8 @@ Everything below is on top of what Seek Reader / CrossPoint already do.
 ### Stability
 - **Heap-aware activity transitions** — the home screen's 48KB framebuffer cache is dropped before launching any sub-activity, so heap-hungry features (File Transfer's WiFi + WebServer + WebSockets) get the room they need.
 - **Cascading cover fallbacks** — when a cover thumb isn't on disk at the resolution stats wants, we render from the home page's pregenerated thumb so the page never shows a blank cover.
+- **Reliable HTTPS downloads (fonts, OTA).** The TLS record buffers are trimmed (asymmetric 16KB receive / 4KB send) so an HTTPS handshake fits the ~380KB heap even after WiFi fragmentation — fixing font/OTA downloads that used to fail the instant you started them on a memory-tight device.
+- **Connect to the nearest mesh node.** WiFi now scans every channel and joins the *strongest* access point instead of the first one it hears, so on multi-node mesh systems (e.g. TP-Link Deco) the reader links to the closest node rather than a distant one — much stronger signal and far more reliable downloads.
 
 ---
 
