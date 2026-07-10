@@ -6,9 +6,11 @@
 #include <HalStorage.h>
 #include <Logging.h>
 #include <WiFi.h>
+#include <esp_task_wdt.h>
+#ifndef SIMULATOR
 #include <esp_efuse.h>
 #include <esp_efuse_table.h>
-#include <esp_task_wdt.h>
+#endif
 
 #include <algorithm>
 #include <cctype>
@@ -356,6 +358,7 @@ void CrossPointWebServer::handleStatus() const {
 
   char snBuf[33] = {0};
   bool valid = false;
+#ifndef SIMULATOR
   if (esp_efuse_read_field_blob(ESP_EFUSE_USER_DATA, snBuf, 256) == ESP_OK) {
     valid = snBuf[0] != '\0' && snBuf[0] != (char)0xFF;
     for (int i = 0; i < 32 && snBuf[i] != '\0'; i++) {
@@ -365,6 +368,7 @@ void CrossPointWebServer::handleStatus() const {
       }
     }
   }
+#endif
 
   if (valid) {
     doc["serial"] = snBuf;
