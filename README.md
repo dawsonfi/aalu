@@ -273,6 +273,7 @@ AALU is **actively developed** — I'm using it as my daily reader and shaping i
 - ✅ End-of-Book next-book suggestions (EPUB + XTC readers)
 - ✅ Selection popup for multi-option settings (Settings + Status Bar)
 - ✅ Wi-Fi signal-strength bars (network list + connected screen)
+- ✅ "Bookmark added / removed" on-screen confirmation when toggling a bookmark
 - ✅ Crash-safe atomic reading-progress writes (temp-file + rename; EPUB/XTC/TXT)
 - ✅ Crash report screen on panic reboot (reason on-screen + `crash_report.txt`)
 - ✅ Render the first page while the rest of the chapter builds in the background (incremental section build)

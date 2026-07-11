@@ -170,6 +170,12 @@ void EpubReaderActivity::loop() {
     }
   }
 
+  // Auto-dismiss the transient bookmark confirmation after a moment.
+  if (showBookmarkMessage && millis() - bookmarkMessageTime > BOOKMARK_MESSAGE_MS) {
+    showBookmarkMessage = false;
+    requestUpdate();
+  }
+
   if (automaticPageTurnActive) {
     if (mappedInput.wasReleased(MappedInputManager::Button::Confirm) ||
         mappedInput.wasReleased(MappedInputManager::Button::Back)) {
@@ -694,7 +700,8 @@ void EpubReaderActivity::toggleBookmark() {
                                  }),
                   bookmarks.end());
 
-  if (bookmarks.size() == countBefore) {
+  const bool added = (bookmarks.size() == countBefore);
+  if (added) {
     const KOReaderPosition koPos =
         ProgressMapper::toKOReader(epub, CrossPointPosition{currentSpineIndex, currentPage, pageCount});
     BookmarkEntry entry;
@@ -711,6 +718,11 @@ void EpubReaderActivity::toggleBookmark() {
   if (!JsonSettingsIO::saveBookmarks(bookmarks, path.c_str())) {
     LOG_ERR("ERS", "Failed to save bookmarks to: %s", path.c_str());
   }
+
+  showBookmarkMessage = true;
+  bookmarkRemoved = !added;
+  bookmarkMessageTime = millis();
+  requestUpdate();
 }
 
 void EpubReaderActivity::applyOrientation(const uint8_t orientation) {
@@ -1005,6 +1017,11 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     lastSavedSpineIndex = currentSpineIndex;
     lastSavedPage = section->currentPage;
     lastSavedPageCount = section->estimatedTotalPages();
+  }
+
+  if (showBookmarkMessage && qsState == QuickSettingsState::CLOSED) {
+    GUI.drawPopup(renderer, bookmarkRemoved ? tr(STR_BOOKMARK_REMOVED) : tr(STR_BOOKMARK_ADDED));
+    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
   }
 
   if (qsState != QuickSettingsState::CLOSED) {

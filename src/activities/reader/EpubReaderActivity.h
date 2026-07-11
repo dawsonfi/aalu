@@ -34,6 +34,12 @@ class EpubReaderActivity final : public Activity {
   uint32_t sessionPagesTurned = 0;   // NEW: tracks pages turned in the current session
   bool automaticPageTurnActive = false;
 
+  // Transient "Bookmark added/removed" confirmation, shown for a moment after a bookmark toggle.
+  bool showBookmarkMessage = false;
+  bool bookmarkRemoved = false;
+  unsigned long bookmarkMessageTime = 0UL;
+  static constexpr unsigned long BOOKMARK_MESSAGE_MS = 1500UL;
+
   EndOfBookOptions endOfBookOptions;
 
   // --- QUICK SETTINGS OVERLAY ---
