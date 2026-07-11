@@ -144,7 +144,10 @@ class BaseTheme {
                         const std::function<std::string(int index)>& rowValue = nullptr, bool highlightValue = false,
                         const std::function<std::string(int index)>& rowSection = nullptr,
                         const std::function<ListToggleState(int index)>& rowToggle = nullptr,
-                        const std::function<bool(int index)>& rowAction = nullptr, bool solidSelection = false) const;
+                        const std::function<bool(int index)>& rowAction = nullptr, bool solidSelection = false,
+                        const std::function<int(int index)>& rowSignal = nullptr) const;
+  void drawSignalBars(const GfxRenderer& renderer, int x, int y, int width, int height, int level,
+                      bool foreground = true) const;
   virtual void drawToggleSwitch(const GfxRenderer& renderer, Rect rect, bool on, bool inverted = false) const;
   virtual void drawBottomSheetFrame(const GfxRenderer& renderer, Rect rect) const;
   virtual void drawHeader(const GfxRenderer& renderer, Rect rect, const char* title,

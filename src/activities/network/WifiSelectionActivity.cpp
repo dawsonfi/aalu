@@ -456,18 +456,20 @@ void WifiSelectionActivity::loop() {
   }
 }
 
-std::string WifiSelectionActivity::getSignalStrengthIndicator(const int32_t rssi) const {
-  // Convert RSSI to signal bars representation
-  if (rssi >= -50) {
-    return "||||";  // Excellent
+int WifiSelectionActivity::signalLevel(const int32_t rssi) const {
+  if (rssi >= -55) {
+    return 4;
   }
-  if (rssi >= -60) {
-    return " |||";  // Good
+  if (rssi >= -65) {
+    return 3;
   }
-  if (rssi >= -70) {
-    return "  ||";  // Fair
+  if (rssi >= -75) {
+    return 2;
   }
-  return "   |";  // Very weak
+  if (rssi >= -85) {
+    return 1;
+  }
+  return 0;
 }
 
 void WifiSelectionActivity::render(RenderLock&&) {
@@ -539,10 +541,10 @@ void WifiSelectionActivity::renderNetworkList() const {
         renderer, Rect{0, contentTop, pageWidth, contentHeight}, static_cast<int>(networks.size()),
         selectedNetworkIndex, [this](int index) { return networks[index].ssid; }, nullptr, nullptr,
         [this](int index) {
-          auto network = networks[index];
-          return std::string(network.hasSavedPassword ? "+ " : "") + (network.isEncrypted ? "* " : "") +
-                 getSignalStrengthIndicator(network.rssi);
-        });
+          const auto& network = networks[index];
+          return std::string(network.hasSavedPassword ? "+ " : "") + (network.isEncrypted ? "*" : "");
+        },
+        false, nullptr, nullptr, nullptr, false, [this](int index) { return signalLevel(networks[index].rssi); });
   }
 
   GUI.drawHelpText(renderer,
@@ -589,6 +591,11 @@ void WifiSelectionActivity::renderConnected() const {
 
   const std::string ipInfo = std::string(tr(STR_IP_ADDRESS_PREFIX)) + connectedIP;
   renderer.drawCenteredText(UI_10_FONT_ID, top + 40, ipInfo.c_str());
+
+  constexpr int barsWidth = 44;
+  constexpr int barsHeight = 26;
+  GUI.drawSignalBars(renderer, (renderer.getScreenWidth() - barsWidth) / 2, top + 80, barsWidth, barsHeight,
+                     signalLevel(WiFi.RSSI()));
 
   // Use centralized button hints
   const auto labels = mappedInput.mapLabels("", tr(STR_DONE), "", "");

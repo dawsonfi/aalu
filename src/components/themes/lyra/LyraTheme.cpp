@@ -261,7 +261,8 @@ void LyraTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
                          const std::function<std::string(int index)>& rowValue, bool highlightValue,
                          const std::function<std::string(int index)>& rowSection,
                          const std::function<ListToggleState(int index)>& rowToggle,
-                         const std::function<bool(int index)>& rowAction, bool solidSelection) const {
+                         const std::function<bool(int index)>& rowAction, bool solidSelection,
+                         const std::function<int(int index)>& rowSignal) const {
   int rowHeight =
       (rowSubtitle != nullptr) ? LyraMetrics::values.listWithSubtitleRowHeight : LyraMetrics::values.listRowHeight;
 
@@ -373,14 +374,19 @@ void LyraTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
     int rowTextX = textX;
     int rowTextWidth = textWidth;
 
+    const int sigLevel = (!isToggle && !isAction && rowSignal != nullptr) ? rowSignal(i) : -1;
+    constexpr int signalBarsWidth = 22;
+    constexpr int signalBarsHeight = 16;
+    const int signalReserve = (sigLevel >= 0) ? (signalBarsWidth + hPaddingInSelection) : 0;
+
     int valueWidth = 0;
     std::string valueText = "";
     if (!isToggle && !isAction && rowValue != nullptr) {
       valueText = rowValue(i);
       valueText = renderer.truncatedText(UI_10_FONT_ID, valueText.c_str(), maxListValueWidth);
       valueWidth = renderer.getTextWidth(UI_10_FONT_ID, valueText.c_str()) + hPaddingInSelection;
-      rowTextWidth -= valueWidth;
     }
+    rowTextWidth -= valueWidth + signalReserve;
 
     // Draw name
     auto itemName = rowTitle(i);
@@ -403,6 +409,13 @@ void LyraTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
       renderer.drawText(SMALL_FONT_ID, rowTextX, itemY + 30, subtitle.c_str(), true);
     }
 
+    int valueRightEdge = rightEdge;
+    if (sigLevel >= 0) {
+      drawSignalBars(renderer, rightEdge - signalBarsWidth, itemY + 6, signalBarsWidth, signalBarsHeight, sigLevel,
+                     !inverted);
+      valueRightEdge = rightEdge - signalBarsWidth - hPaddingInSelection;
+    }
+
     if (isToggle) {
       drawToggleSwitch(renderer, Rect{rect.x, itemY, rightEdge - hPaddingInSelection - rect.x, rowContentHeight},
                        toggleState == ListToggleState::On, inverted);
@@ -417,10 +430,10 @@ void LyraTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
         char steppedValue[80];
         snprintf(steppedValue, sizeof(steppedValue), "%s %s %s", listChevronLeft, valueText.c_str(), listChevronRight);
         const int steppedWidth = renderer.getTextWidth(UI_10_FONT_ID, steppedValue);
-        renderer.drawText(UI_10_FONT_ID, rightEdge - hPaddingInSelection - steppedWidth, itemY + 6, steppedValue,
+        renderer.drawText(UI_10_FONT_ID, valueRightEdge - hPaddingInSelection - steppedWidth, itemY + 6, steppedValue,
                           !inverted);
       } else {
-        renderer.drawText(UI_10_FONT_ID, rightEdge - valueWidth, itemY + 6, valueText.c_str(), !inverted);
+        renderer.drawText(UI_10_FONT_ID, valueRightEdge - valueWidth, itemY + 6, valueText.c_str(), !inverted);
       }
     }
 

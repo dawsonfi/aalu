@@ -335,7 +335,8 @@ void BaseTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
                          const std::function<std::string(int index)>& rowValue, bool highlightValue,
                          const std::function<std::string(int index)>& rowSection,
                          const std::function<ListToggleState(int index)>& rowToggle,
-                         const std::function<bool(int index)>& rowAction, bool solidSelection) const {
+                         const std::function<bool(int index)>& rowAction, bool solidSelection,
+                         const std::function<int(int index)>& rowSignal) const {
   (void)highlightValue;
   (void)solidSelection;
   int rowHeight =
@@ -414,12 +415,42 @@ void BaseTheme::drawList(const GfxRenderer& renderer, Rect rect, int itemCount, 
       const int chevronCy = itemY + rowHeight / 2 - 2;
       renderer.drawLine(chevronTipX - chevronHalf, chevronCy - chevronHalf, chevronTipX, chevronCy, i != selectedIndex);
       renderer.drawLine(chevronTipX - chevronHalf, chevronCy + chevronHalf, chevronTipX, chevronCy, i != selectedIndex);
-    } else if (rowValue != nullptr) {
-      // Draw value
-      std::string valueText = rowValue(i);
-      const auto valueTextWidth = renderer.getTextWidth(UI_10_FONT_ID, valueText.c_str());
-      renderer.drawText(UI_10_FONT_ID, rect.x + contentWidth - BaseMetrics::values.contentSidePadding - valueTextWidth,
-                        itemY, valueText.c_str(), i != selectedIndex);
+    } else if (rowValue != nullptr || rowSignal != nullptr) {
+      int valueRight = rect.x + contentWidth - BaseMetrics::values.contentSidePadding;
+      if (rowSignal != nullptr) {
+        const int level = rowSignal(i);
+        if (level >= 0) {
+          constexpr int barsWidth = 22;
+          constexpr int barsHeight = 16;
+          drawSignalBars(renderer, valueRight - barsWidth, itemY + 2, barsWidth, barsHeight, level, i != selectedIndex);
+          valueRight -= barsWidth + 6;
+        }
+      }
+      if (rowValue != nullptr) {
+        std::string valueText = rowValue(i);
+        const auto valueTextWidth = renderer.getTextWidth(UI_10_FONT_ID, valueText.c_str());
+        renderer.drawText(UI_10_FONT_ID, valueRight - valueTextWidth, itemY, valueText.c_str(), i != selectedIndex);
+      }
+    }
+  }
+}
+
+void BaseTheme::drawSignalBars(const GfxRenderer& renderer, int x, int y, int width, int height, int level,
+                               bool foreground) const {
+  constexpr int numBars = 4;
+  constexpr int gap = 2;
+  const int barWidth = (width - gap * (numBars - 1)) / numBars;
+  if (barWidth <= 0) {
+    return;
+  }
+  for (int b = 0; b < numBars; b++) {
+    const int barHeight = height * (b + 1) / numBars;
+    const int barX = x + b * (barWidth + gap);
+    const int barY = y + (height - barHeight);
+    if (b < level) {
+      renderer.fillRect(barX, barY, barWidth, barHeight, foreground);
+    } else {
+      renderer.drawRect(barX, barY, barWidth, barHeight, foreground);
     }
   }
 }
