@@ -289,20 +289,23 @@ bool FontDownloadActivity::downloadFamilyFiles(const std::string& familyName, co
 
     std::string url = baseUrl_ + file.name;
 
-    auto result = HttpDownloader::downloadToFile(url, destPath, [this](size_t downloaded, size_t total) {
-      fileProgress_ = downloaded;
-      fileTotal_ = total;
-      mappedInput.update();
-      if (mappedInput.isPressed(MappedInputManager::Button::Back) ||
-          mappedInput.wasPressed(MappedInputManager::Button::Back)) {
-        cancelRequested_ = true;
-      }
-      const int progressBucket = total > 0 ? static_cast<int>((downloaded * 50) / total) : 0;
-      if (progressBucket != lastRenderedProgress_) {
-        lastRenderedProgress_ = progressBucket;
-        requestUpdate(true);
-      }
-    });
+    auto result = HttpDownloader::downloadToFile(
+        url, destPath,
+        [this](size_t downloaded, size_t total) {
+          fileProgress_ = downloaded;
+          fileTotal_ = total;
+          mappedInput.update();
+          if (mappedInput.isPressed(MappedInputManager::Button::Back) ||
+              mappedInput.wasPressed(MappedInputManager::Button::Back)) {
+            cancelRequested_ = true;
+          }
+          const int progressBucket = total > 0 ? static_cast<int>((downloaded * 50) / total) : 0;
+          if (progressBucket != lastRenderedProgress_) {
+            lastRenderedProgress_ = progressBucket;
+            requestUpdate(true);
+          }
+        },
+        &cancelRequested_);
 
     if (result == HttpDownloader::ABORTED) {
       fontInstaller_.deleteFamily(familyName.c_str());

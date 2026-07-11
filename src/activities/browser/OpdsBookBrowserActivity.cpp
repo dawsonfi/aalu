@@ -234,7 +234,7 @@ void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
 
   {
     OpdsParserStream stream{parser};
-    if (!HttpDownloader::fetchUrl(url, stream)) {
+    if (!HttpDownloader::fetchUrl(url, stream, SETTINGS.opdsUsername, SETTINGS.opdsPassword)) {
       state = BrowserState::ERROR;
       errorMessage = tr(STR_FETCH_FEED_FAILED);
       requestUpdate();
@@ -316,12 +316,14 @@ void OpdsBookBrowserActivity::downloadBook(const OpdsEntry& book) {
 
   LOG_DBG("OPDS", "Downloading: %s -> %s", downloadUrl.c_str(), filename.c_str());
 
-  const auto result =
-      HttpDownloader::downloadToFile(downloadUrl, filename, [this](const size_t downloaded, const size_t total) {
+  const auto result = HttpDownloader::downloadToFile(
+      downloadUrl, filename,
+      [this](const size_t downloaded, const size_t total) {
         downloadProgress = downloaded;
         downloadTotal = total;
         requestUpdate(true);  // Force update to refresh progress bar
-      });
+      },
+      nullptr, SETTINGS.opdsUsername, SETTINGS.opdsPassword);
 
   if (result == HttpDownloader::OK) {
     LOG_DBG("OPDS", "Download complete: %s", filename.c_str());

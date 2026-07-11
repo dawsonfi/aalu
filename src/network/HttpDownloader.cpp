@@ -1,30 +1,25 @@
 #include "HttpDownloader.h"
 
 #include <Arduino.h>
-#include <HTTPClient.h>
 #include <Logging.h>
-#include <NetworkClient.h>
-#include <NetworkClientSecure.h>
-#include <StreamString.h>
-#include <WiFi.h>
+#include <Memory.h>
 #include <base64.h>
+#include <esp_crt_bundle.h>
+#include <esp_http_client.h>
 
-#include <algorithm>
 #include <cstring>
-#include <memory>
-#include <utility>
+#include <functional>
+#include <string>
 
 #ifndef SIMULATOR
-#include "esp_wifi.h"
+#include <esp_wifi.h>
 #endif
 
-#include "CrossPointSettings.h"
-#include "util/UrlUtils.h"
-
 namespace {
-constexpr uint16_t HTTP_TIMEOUT_MS = 15000;
-constexpr size_t DOWNLOAD_CHUNK_BYTES = 2048;
-constexpr unsigned long DOWNLOAD_STALL_TIMEOUT_MS = 300000;
+constexpr int HTTP_RX_BUF = 4096;
+constexpr int HTTP_TX_BUF = 1024;
+constexpr int HTTP_TIMEOUT_MS = 60000;
+constexpr size_t READ_CHUNK = 2048;
 
 class WifiSleepGuard {
  public:
@@ -43,239 +38,166 @@ class WifiSleepGuard {
   WifiSleepGuard& operator=(const WifiSleepGuard&) = delete;
 };
 
-class FileWriteStream final : public Stream {
- public:
-  FileWriteStream(FsFile& file, size_t total, HttpDownloader::ProgressCallback progress)
-      : file_(file), total_(total), progress_(std::move(progress)) {}
-
-  size_t write(uint8_t byte) override { return write(&byte, 1); }
-
-  size_t write(const uint8_t* buffer, size_t size) override {
-    const size_t written = file_.write(buffer, size);
-    if (written != size) {
-      writeOk_ = false;
-    }
-    downloaded_ += written;
-    if (progress_ && total_ > 0) {
-      progress_(downloaded_, total_);
-    }
-    return written;
-  }
-
-  int available() override { return 0; }
-  int read() override { return -1; }
-  int peek() override { return -1; }
-  void flush() override { file_.flush(); }
-
-  size_t downloaded() const { return downloaded_; }
-  bool ok() const { return writeOk_; }
-
- private:
-  FsFile& file_;
-  size_t total_;
-  size_t downloaded_ = 0;
-  bool writeOk_ = true;
-  HttpDownloader::ProgressCallback progress_;
+struct Sink {
+  std::function<bool(const uint8_t*, size_t)> write;
+  HttpDownloader::ProgressCallback progress;
+  bool* cancelFlag = nullptr;
+  size_t total = 0;
+  size_t downloaded = 0;
 };
-}  // namespace
 
-bool HttpDownloader::fetchUrl(const std::string& url, Stream& outContent) {
-  // Use NetworkClientSecure for HTTPS, regular NetworkClient for HTTP
-  std::unique_ptr<NetworkClient> client;
-  if (UrlUtils::isHttpsUrl(url)) {
-    auto* secureClient = new NetworkClientSecure();
-    secureClient->setInsecure();
-    client.reset(secureClient);
-  } else {
-    client.reset(new NetworkClient());
-  }
-  HTTPClient http;
-
-  LOG_DBG("HTTP", "Fetching: %s", url.c_str());
-
-  http.begin(*client, url.c_str());
-  http.setConnectTimeout(HTTP_TIMEOUT_MS);
-  http.setTimeout(HTTP_TIMEOUT_MS);
-  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  http.addHeader("User-Agent", "CrossPoint-ESP32-" AALU_VERSION);
-
-  // Add Basic HTTP auth if credentials are configured
-  if (strlen(SETTINGS.opdsUsername) > 0 && strlen(SETTINGS.opdsPassword) > 0) {
-    std::string credentials = std::string(SETTINGS.opdsUsername) + ":" + SETTINGS.opdsPassword;
-    String encoded = base64::encode(credentials.c_str());
-    http.addHeader("Authorization", "Basic " + encoded);
-  }
-
-  const int httpCode = http.GET();
-  if (httpCode != HTTP_CODE_OK) {
-    LOG_ERR("HTTP", "Fetch failed: %d", httpCode);
-    http.end();
-    return false;
-  }
-
-  http.writeToStream(&outContent);
-
-  http.end();
-
-  LOG_DBG("HTTP", "Fetch success");
-  return true;
+bool isRedirect(int status) {
+  return status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
 }
 
-bool HttpDownloader::fetchUrl(const std::string& url, std::string& outContent) {
-  StreamString stream;
-  if (!fetchUrl(url, stream)) {
-    return false;
+HttpDownloader::DownloadError runGet(const std::string& url, const std::string& username, const std::string& password,
+                                     Sink& sink) {
+  esp_http_client_config_t config = {};
+  config.url = url.c_str();
+  config.buffer_size = HTTP_RX_BUF;
+  config.buffer_size_tx = HTTP_TX_BUF;
+  config.timeout_ms = HTTP_TIMEOUT_MS;
+  config.crt_bundle_attach = esp_crt_bundle_attach;
+  config.keep_alive_enable = true;
+
+  esp_http_client_handle_t client = esp_http_client_init(&config);
+  if (!client) {
+    LOG_ERR("HTTP", "client init failed");
+    return HttpDownloader::HTTP_ERROR;
   }
-  outContent = stream.c_str();
-  return true;
+
+  esp_http_client_set_header(client, "User-Agent", "CrossPoint-ESP32-" AALU_VERSION);
+  if (!username.empty() && !password.empty()) {
+    const std::string credentials = username + ":" + password;
+    const String header = "Basic " + base64::encode(credentials.c_str());
+    esp_http_client_set_header(client, "Authorization", header.c_str());
+  }
+
+  esp_err_t err = esp_http_client_open(client, 0);
+  if (err != ESP_OK) {
+    LOG_ERR("HTTP", "open failed: %s", esp_err_to_name(err));
+    esp_http_client_cleanup(client);
+    return HttpDownloader::HTTP_ERROR;
+  }
+  int64_t contentLength = esp_http_client_fetch_headers(client);
+  int status = esp_http_client_get_status_code(client);
+  for (int hop = 0; isRedirect(status) && hop < 5; ++hop) {
+    if (esp_http_client_set_redirection(client) != ESP_OK) break;
+    err = esp_http_client_open(client, 0);
+    if (err != ESP_OK) {
+      LOG_ERR("HTTP", "redirect open failed: %s", esp_err_to_name(err));
+      esp_http_client_cleanup(client);
+      return HttpDownloader::HTTP_ERROR;
+    }
+    contentLength = esp_http_client_fetch_headers(client);
+    status = esp_http_client_get_status_code(client);
+  }
+
+  if (status != 200) {
+    LOG_ERR("HTTP", "unexpected status: %d", status);
+    esp_http_client_cleanup(client);
+    return HttpDownloader::HTTP_ERROR;
+  }
+
+  sink.total = contentLength > 0 ? static_cast<size_t>(contentLength) : 0;
+
+  auto buf = makeUniqueNoThrow<char[]>(READ_CHUNK);
+  if (!buf) {
+    LOG_ERR("HTTP", "OOM: %u byte read buffer", static_cast<unsigned>(READ_CHUNK));
+    esp_http_client_cleanup(client);
+    return HttpDownloader::HTTP_ERROR;
+  }
+
+  while (true) {
+    if (sink.cancelFlag && *sink.cancelFlag) {
+      esp_http_client_cleanup(client);
+      return HttpDownloader::ABORTED;
+    }
+    const int read = esp_http_client_read(client, buf.get(), READ_CHUNK);
+    if (read < 0) {
+      LOG_ERR("HTTP", "read error after %zu bytes", sink.downloaded);
+      esp_http_client_cleanup(client);
+      return HttpDownloader::HTTP_ERROR;
+    }
+    if (read == 0) break;
+    if (!sink.write(reinterpret_cast<const uint8_t*>(buf.get()), read)) {
+      esp_http_client_cleanup(client);
+      return HttpDownloader::FILE_ERROR;
+    }
+    sink.downloaded += read;
+    if (sink.progress && sink.total > 0) sink.progress(sink.downloaded, sink.total);
+  }
+
+  const bool complete = esp_http_client_is_complete_data_received(client);
+  esp_http_client_cleanup(client);
+  if (!complete) {
+    LOG_ERR("HTTP", "incomplete: got %zu of %zu bytes", sink.downloaded, sink.total);
+    return HttpDownloader::HTTP_ERROR;
+  }
+  return HttpDownloader::OK;
+}
+}  // namespace
+
+bool HttpDownloader::fetchUrl(const std::string& url, Stream& outContent, const std::string& username,
+                              const std::string& password) {
+  LOG_DBG("HTTP", "Fetching: %s", url.c_str());
+  Sink sink;
+  sink.write = [&outContent](const uint8_t* data, size_t len) { return outContent.write(data, len) == len; };
+  return runGet(url, username, password, sink) == OK;
+}
+
+bool HttpDownloader::fetchUrl(const std::string& url, std::string& outContent, const std::string& username,
+                              const std::string& password) {
+  LOG_DBG("HTTP", "Fetching: %s", url.c_str());
+  outContent.clear();
+  Sink sink;
+  sink.write = [&outContent](const uint8_t* data, size_t len) {
+    outContent.append(reinterpret_cast<const char*>(data), len);
+    return true;
+  };
+  return runGet(url, username, password, sink) == OK;
+}
+
+bool HttpDownloader::fetchUrl(const std::string& url, const DataCallback& onData, const std::string& username,
+                              const std::string& password) {
+  LOG_DBG("HTTP", "Fetching: %s", url.c_str());
+  Sink sink;
+  sink.write = onData;
+  return runGet(url, username, password, sink) == OK;
 }
 
 HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& url, const std::string& destPath,
-                                                             ProgressCallback progress) {
+                                                             ProgressCallback progress, bool* cancelFlag,
+                                                             const std::string& username, const std::string& password) {
   WifiSleepGuard wifiSleepGuard;
+  LOG_DBG("HTTP", "Downloading: %s -> %s", url.c_str(), destPath.c_str());
 
-  // Use NetworkClientSecure for HTTPS, regular NetworkClient for HTTP
-  std::unique_ptr<NetworkClient> client;
-  if (UrlUtils::isHttpsUrl(url)) {
-    auto* secureClient = new NetworkClientSecure();
-    secureClient->setInsecure();
-    client.reset(secureClient);
-  } else {
-    client.reset(new NetworkClient());
-  }
-  HTTPClient http;
-
-  LOG_DBG("HTTP", "Downloading: %s", url.c_str());
-  LOG_DBG("HTTP", "Destination: %s", destPath.c_str());
-
-  http.begin(*client, url.c_str());
-  http.setConnectTimeout(HTTP_TIMEOUT_MS);
-  http.setTimeout(HTTP_TIMEOUT_MS);
-  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  http.addHeader("User-Agent", "CrossPoint-ESP32-" AALU_VERSION);
-
-  // Add Basic HTTP auth if credentials are configured
-  if (strlen(SETTINGS.opdsUsername) > 0 && strlen(SETTINGS.opdsPassword) > 0) {
-    std::string credentials = std::string(SETTINGS.opdsUsername) + ":" + SETTINGS.opdsPassword;
-    String encoded = base64::encode(credentials.c_str());
-    http.addHeader("Authorization", "Basic " + encoded);
-  }
-
-  const int httpCode = http.GET();
-  if (httpCode != HTTP_CODE_OK) {
-    LOG_ERR("HTTP", "Download failed: %d", httpCode);
-    http.end();
-    return HTTP_ERROR;
-  }
-
-  const int64_t reportedLength = http.getSize();
-  const size_t contentLength = reportedLength > 0 ? static_cast<size_t>(reportedLength) : 0;
-  if (contentLength > 0) {
-    LOG_DBG("HTTP", "Content-Length: %zu", contentLength);
-  } else {
-    LOG_DBG("HTTP", "Content-Length: unknown");
-  }
-
-  // Remove existing file if present
   if (Storage.exists(destPath.c_str())) {
     Storage.remove(destPath.c_str());
   }
-
-  // Open file for writing
   FsFile file;
   if (!Storage.openFileForWrite("HTTP", destPath.c_str(), file)) {
     LOG_ERR("HTTP", "Failed to open file for writing");
-    http.end();
     return FILE_ERROR;
   }
 
-  size_t downloaded = 0;
-  bool writeOk = true;
+  Sink sink;
+  sink.progress = std::move(progress);
+  sink.cancelFlag = cancelFlag;
+  sink.write = [&file](const uint8_t* data, size_t len) { return file.write(data, len) == len; };
 
-  if (contentLength > 0) {
-    Stream* stream = http.getStreamPtr();
-    if (stream == nullptr) {
-      LOG_ERR("HTTP", "No response stream");
-      file.close();
-      http.end();
-      Storage.remove(destPath.c_str());
-      return HTTP_ERROR;
-    }
-
-    uint8_t buf[DOWNLOAD_CHUNK_BYTES];
-    unsigned long lastDataMs = millis();
-
-    while (downloaded < contentLength) {
-      if (!http.connected() && stream->available() == 0) {
-        break;
-      }
-      if (millis() - lastDataMs > DOWNLOAD_STALL_TIMEOUT_MS) {
-        LOG_ERR("HTTP", "Stalled at %zu/%zu bytes", downloaded, contentLength);
-        break;
-      }
-
-      const size_t avail = static_cast<size_t>(stream->available());
-      if (avail == 0) {
-        delay(10);
-        continue;
-      }
-
-      size_t want = std::min(avail, DOWNLOAD_CHUNK_BYTES);
-      want = std::min(want, contentLength - downloaded);
-
-      const int bytesRead = stream->readBytes(buf, want);
-      if (bytesRead <= 0) {
-        delay(10);
-        continue;
-      }
-
-      if (file.write(buf, static_cast<size_t>(bytesRead)) != static_cast<size_t>(bytesRead)) {
-        writeOk = false;
-        break;
-      }
-      downloaded += static_cast<size_t>(bytesRead);
-      lastDataMs = millis();
-
-      if (progress) {
-        progress(downloaded, contentLength);
-      }
-    }
-  } else {
-    FileWriteStream fileStream(file, contentLength, progress);
-    const int writeResult = http.writeToStream(&fileStream);
-    downloaded = fileStream.downloaded();
-    writeOk = fileStream.ok();
-    if (writeResult < 0) {
-      LOG_ERR("HTTP", "writeToStream error: %d", writeResult);
-      file.close();
-      http.end();
-      Storage.remove(destPath.c_str());
-      return HTTP_ERROR;
-    }
-  }
-
+  const DownloadError result = runGet(url, username, password, sink);
   file.close();
-  http.end();
 
-  LOG_DBG("HTTP", "Downloaded %zu bytes", downloaded);
-
-  if (!writeOk) {
-    LOG_ERR("HTTP", "Write failed during download");
+  if (result != OK) {
     Storage.remove(destPath.c_str());
-    return FILE_ERROR;
+    return result;
   }
-
-  if (contentLength == 0 && downloaded == 0) {
-    LOG_ERR("HTTP", "Download failed: no data received");
+  if (sink.downloaded == 0) {
+    LOG_ERR("HTTP", "no data received");
     Storage.remove(destPath.c_str());
     return HTTP_ERROR;
   }
-
-  if (contentLength > 0 && downloaded != contentLength) {
-    LOG_ERR("HTTP", "Size mismatch: got %zu, expected %zu", downloaded, contentLength);
-    Storage.remove(destPath.c_str());
-    return HTTP_ERROR;
-  }
-
+  LOG_DBG("HTTP", "Downloaded %zu bytes", sink.downloaded);
   return OK;
 }
