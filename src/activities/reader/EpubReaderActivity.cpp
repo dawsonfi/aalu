@@ -875,7 +875,9 @@ void EpubReaderActivity::render(RenderLock&& lock) {
         // completion; an ordinary page target builds just past it. Show the popup only for a deep
         // resume so a shallow landing stays popup-free.
         const int target = (nextPageNumber < 0) ? 0 : nextPageNumber;
-        if (target > BUILD_POPUP_PAGE_THRESHOLD) {
+        const size_t spineBytes = epub->getCumulativeSpineItemSize(currentSpineIndex) -
+                                  (currentSpineIndex > 0 ? epub->getCumulativeSpineItemSize(currentSpineIndex - 1) : 0);
+        if (target > BUILD_POPUP_PAGE_THRESHOLD || spineBytes > BUILD_POPUP_BYTE_THRESHOLD) {
           GUI.drawPopup(renderer, tr(STR_INDEXING));
           pagesUntilFullRefresh = 1;
         }

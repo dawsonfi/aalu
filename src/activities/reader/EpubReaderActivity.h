@@ -93,6 +93,10 @@ class EpubReaderActivity final : public Activity {
   static constexpr int BUILD_PAGES_PER_CHUNK = 8;
   static constexpr int BACKGROUND_BUILD_PAGES_PER_TICK = 2;
   static constexpr int BUILD_POPUP_PAGE_THRESHOLD = 20;
+  // Also show the indexing popup when first building a spine whose uncompressed HTML exceeds this:
+  // the whole spine must inflate before page 1 can lay out (the giant single-spine case), a
+  // multi-second wait even though its page count is small. Ordinary chapters stay under this.
+  static constexpr size_t BUILD_POPUP_BYTE_THRESHOLD = 96 * 1024;
 
   void renderContents(std::unique_ptr<Page> page, int orientedMarginTop, int orientedMarginRight,
                       int orientedMarginBottom, int orientedMarginLeft);
