@@ -10,11 +10,15 @@ Goal (user, 2026-07-11): incorporate **all** CrossPoint `develop` features into 
 - **2.26.0** bookmark added/removed confirmation (timed overlay, survives grayscale AA re-display). 907896e8.
 - **2.27.0** finished-book automation toggles (removeReadBooksFromRecents + moveFinishedToReadFolder; `/read/` move re-keys cache via `FsHelpers::cachePathHash`). 15ac29ac.
 - **2.28.0** "Never" sleep-timeout enum value (`SLEEP_NEVER`, getSleepTimeoutMs=~0UL; adapted to AALU's enum picker, not the raw-minutes widget). 6ff0eea8.
+- **3.0.0** multi-server OPDS (replaced single Calibre). `OpdsServerStore` (mirrors WifiCredentialStore → `/.crosspoint/opds.json`) + `JsonSettingsIO::saveOpds/loadOpds` + `OpdsServerListActivity` (list/add/edit/delete + pickerMode→browse) + `OpdsServerEditActivity` (name/url/user/pass + delete). Browser takes an `OpdsServer`; `goToBrowser`→picker; Settings "OPDS Browser"→list. One-time migration seeds from the old `SETTINGS.opds*`. Retired `CalibreSettingsActivity`. **MAJOR bump** for accumulated breaking changes (section.bin v20→v21 + OPDS config). 7ea8b5e4.
 - **Focus Reading = already done** (== `bionicReading`, render-time, better than CrossPoint's cached version). No port.
 - **Audit complete** (Explore agent): full gap map below.
 
-## Remaining (scoped this run) — recommended order: OPDS/web → KOReader → RTL → v25
-- Items 1-5 above (end-of-book toggles, bookmark, atomic writes, sleep, #2452 refinement) are all SHIPPED. Remaining below.
+## Version note
+Now on **3.0.0** (major bump done — breaking changes shipped). Continue remaining features as **3.x minor** bumps (3.1.0, 3.2.0, …); another major bump only if a further breaking change (e.g. the v25 format) warrants it.
+
+## Remaining (scoped this run) — recommended order: web/OPDS-search → KOReader → RTL → v25
+- All small wins + multi-server OPDS are SHIPPED. Remaining below (each medium-to-large, none a quick win).
 
 ## Rules for every item
 - Re-implement adapting to AALU's diverged code, NOT diff-apply. English-only (`lib/I18n/translations/english.yaml` only). No source comments unless a load-bearing WHY (ask first). Enum/GraphQL docs exempt (N/A here). 380 KB RAM discipline. New screens use `GUI.drawButtonHintsGlyphs`, not the legacy bar. Own minor version + full CI mirror (clang-format-21, `pio check` med/high, `pio run`, `cd test/build && cmake --build . && ctest`) + sim build before each commit. Leave `git push` to the user.
@@ -30,8 +34,8 @@ Goal (user, 2026-07-11): incorporate **all** CrossPoint `develop` features into 
 
 ### Web / OPDS (medium)
 6. **Web `/api/wifi`** management (small). CrossPoint `CrossPointWebServer.cpp:177-179,1413-1526` GET/POST/delete for saved WiFi. AALU shares `WifiCredentialStore` (on-device mgmt exists) but its `CrossPointWebServer.cpp` has no `/api/wifi` route. Add the route + reuse the store.
-7. **OPDS catalog in-book search** (small-medium). CrossPoint `OpdsBookBrowserActivity` has `SEARCH_INPUT` state + `launchSearch()`/`performSearch(query)`. AALU's `OpdsBookBrowserActivity` has no search state. Add search (tie into keyboard entry).
-8. **Multi-server OPDS management** (medium, UX conflict). CrossPoint: add/edit/delete named servers (`OpdsServerListActivity`/`OpdsSettingsActivity`, `SettingsActivity.cpp:64,273-274`; web `/api/opds`). AALU has single hard-coded `CalibreSettingsActivity` ("OPDS Browser", `SettingsActivity.cpp:60-62,261-262`). Decide: replace Calibre UX with generic multi-server, or add alongside. Menu-option gap `STR_OPDS_SERVERS`.
+7. **OPDS catalog in-book search** (small-medium). CrossPoint `OpdsBookBrowserActivity` has `SEARCH_INPUT` state + `launchSearch()`/`performSearch(query)`. AALU's `OpdsBookBrowserActivity` has no search state. Add a search input (reuse `KeyboardEntryActivity`) issuing the catalog's OpenSearch query. Now builds cleanly on the shipped multi-server browser (each browser instance already has its `OpdsServer`).
+8. ✅ **Multi-server OPDS management — SHIPPED (3.0.0, 7ea8b5e4).** See shipped list above. Also still-open follow-on: web `/api/opds` (browser-side add/edit/delete of servers) — pairs with item 6's web WiFi work.
 
 ### Large / user-named (need external verification)
 9. **KOReader exact-path sync** (medium-large, remote-verifiable only). CrossPoint `lib/KOReaderSync/ChapterXPathResolver.{cpp,h}` (600 lines: re-parse chapter, resolve a real DOM XPath → exact page) + heavy `ProgressMapper.cpp` (903 lines). AALU `ProgressMapper.cpp` is 138 lines, heuristic ("~6 DOM nodes/page", `generateXPath`/`toCrossPoint`). **AALU's SEND side is already exact** (uses `page->syncXPath` from the parser's `childTracker`/`pathElements`/`currentXPath`); the gap is the RECEIVE side (map an incoming XPath → exact page). Port `ChapterXPathResolver` (adapt to AALU's parser) + upgrade `ProgressMapper::toCrossPoint`. Does NOT touch layout/section format. Verify against a real KOReader server.
