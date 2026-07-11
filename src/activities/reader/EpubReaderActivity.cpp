@@ -451,10 +451,8 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
               auto block = line.getBlock();
               if (!block) continue;
 
-              const auto& words = block->getWords();
-
-              if (!words.empty()) {
-                nextPageFirstWord = words.front();
+              if (block->wordCount() > 0) {
+                nextPageFirstWord = block->wordText(0);
                 break;
               }
             }
@@ -508,10 +506,10 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
             if (el->getTag() == TAG_PageLine) {
               const auto& line = static_cast<const PageLine&>(*el);
               if (line.getBlock()) {
-                const auto& words = line.getBlock()->getWords();
-                for (const auto& w : words) {
+                const auto& b = *line.getBlock();
+                for (uint16_t i = 0; i < b.wordCount(); i++) {
                   if (!fullText.empty()) fullText += " ";
-                  fullText += w;
+                  fullText += b.wordText(i);
                 }
               }
             }
@@ -624,11 +622,12 @@ void EpubReaderActivity::toggleBookmark() {
           if (el->getTag() == TAG_PageLine) {
             const auto& line = static_cast<const PageLine&>(*el);
             if (line.getBlock()) {
-              for (const auto& word : line.getBlock()->getWords()) {
+              const auto& b = *line.getBlock();
+              for (uint16_t i = 0; i < b.wordCount(); i++) {
                 if (!pageText.empty()) {
                   pageText += " ";
                 }
-                pageText += word;
+                pageText += b.wordText(i);
               }
             }
           }

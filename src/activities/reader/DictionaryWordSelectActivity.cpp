@@ -68,11 +68,7 @@ void DictionaryWordSelectActivity::extractWords() {
     auto block = line.getBlock();
     if (!block) continue;
 
-    const auto& lineWords = block->getWords();
-    if (lineWords.empty()) continue;
-
-    const auto& wordXpos = block->getWordXpos();
-    const auto& wordStyles = block->getWordStyles();
+    if (block->wordCount() == 0) continue;
 
     int16_t currentY = marginTop + line.yPos;
     if (currentY != lastY) {
@@ -81,9 +77,10 @@ void DictionaryWordSelectActivity::extractWords() {
       lastY = currentY;
     }
 
-    for (size_t i = 0; i < lineWords.size(); ++i) {
-      const std::string& raw = lineWords[i];
-      int16_t baseX = marginLeft + line.xPos + wordXpos[i];
+    for (uint16_t i = 0; i < block->wordCount(); ++i) {
+      const std::string raw = block->wordText(i);
+      const auto style = block->wordStyle(i);
+      int16_t baseX = marginLeft + line.xPos + block->wordXpos(i);
 
       std::string prefix = "";
       std::string current_word = "";
@@ -91,8 +88,8 @@ void DictionaryWordSelectActivity::extractWords() {
       auto emitWord = [&]() {
         if (current_word.empty()) return;
 
-        int pre_w = prefix.empty() ? 0 : renderer.getTextWidth(fontId, prefix.c_str(), wordStyles[i]);
-        int word_w = renderer.getTextWidth(fontId, current_word.c_str(), wordStyles[i]);
+        int pre_w = prefix.empty() ? 0 : renderer.getTextWidth(fontId, prefix.c_str(), style);
+        int word_w = renderer.getTextWidth(fontId, current_word.c_str(), style);
 
         std::string lookup = current_word;
         while (!lookup.empty() && lookup.back() == '\'') lookup.pop_back();
@@ -131,7 +128,7 @@ void DictionaryWordSelectActivity::extractWords() {
       }
       emitWord();
 
-      if (i == lineWords.size() - 1 && !raw.empty() && raw.back() == '-') {
+      if (i == block->wordCount() - 1 && !raw.empty() && raw.back() == '-') {
         if (!words.empty() && words.back().rowIndex == currentRowIndex) {
           words.back().isHyphenatedLineEnd = true;
         }

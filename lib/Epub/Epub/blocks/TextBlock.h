@@ -2,6 +2,7 @@
 #include <EpdFontFamily.h>
 #include <HalStorage.h>
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -12,31 +13,40 @@
 // Represents a line of text on a page
 class TextBlock final : public Block {
  private:
-  std::vector<std::string> words;
-  std::vector<int16_t> wordXpos;
-  std::vector<EpdFontFamily::Style> wordStyles;
   BlockStyle blockStyle;
+  uint16_t numWords = 0;
+  uint16_t textBytes = 0;
+  bool isValid = true;
+  std::unique_ptr<uint8_t[]> arena;
+  const uint16_t* textOffArr = nullptr;
+  const int16_t* xposArr = nullptr;
+  const uint8_t* stylesArr = nullptr;
+  const char* textArr = nullptr;
+
+  TextBlock() = default;
+  static size_t arenaSize(uint16_t wordCount, uint16_t textBytes);
+  void bindArenaPointers();
 
  public:
-  explicit TextBlock(std::vector<std::string> words, std::vector<int16_t> word_xpos,
-                     std::vector<EpdFontFamily::Style> word_styles, const BlockStyle& blockStyle = BlockStyle())
-      : words(std::move(words)),
-        wordXpos(std::move(word_xpos)),
-        wordStyles(std::move(word_styles)),
-        blockStyle(blockStyle) {}
+  explicit TextBlock(const std::vector<std::string>& words, const std::vector<int16_t>& wordXpos,
+                     const std::vector<EpdFontFamily::Style>& wordStyles, const BlockStyle& blockStyle = BlockStyle());
   ~TextBlock() override = default;
+  TextBlock(const TextBlock&) = delete;
+  TextBlock& operator=(const TextBlock&) = delete;
+
   void setBlockStyle(const BlockStyle& blockStyle) { this->blockStyle = blockStyle; }
   const BlockStyle& getBlockStyle() const { return blockStyle; }
-  const std::vector<std::string>& getWords() const { return words; }
-
-  const std::vector<int16_t>& getWordXpos() const { return wordXpos; }  // Added for dictionary development
-  const std::vector<EpdFontFamily::Style>& getWordStyles() const {      // Added for dictionary development
-    return wordStyles;
+  bool isEmpty() override { return numWords == 0; }
+  bool valid() const { return isValid; }
+  uint16_t wordCount() const { return numWords; }
+  const char* wordText(const uint16_t i) const { return textArr + textOffArr[i]; }
+  uint16_t wordTextLen(const uint16_t i) const {
+    const uint16_t end = (i + 1 < numWords) ? textOffArr[i + 1] : textBytes;
+    return end - textOffArr[i] - 1;
   }
+  int16_t wordXpos(const uint16_t i) const { return xposArr[i]; }
+  EpdFontFamily::Style wordStyle(const uint16_t i) const { return static_cast<EpdFontFamily::Style>(stylesArr[i]); }
 
-  bool isEmpty() override { return words.empty(); }
-  size_t wordCount() const { return words.size(); }
-  // given a renderer works out where to break the words into lines
   // Bionic Reading (first N codepoints in BOLD) is controlled by the global BionicReading::enabled flag.
   void render(const GfxRenderer& renderer, int fontId, int x, int y) const;
   BlockType getType() override { return TEXT_BLOCK; }
