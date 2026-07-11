@@ -14,6 +14,7 @@
 #include "home/HomeActivity.h"
 #include "network/CrossPointWebServerActivity.h"
 #include "reader/ReaderActivity.h"
+#include "settings/OpdsServerListActivity.h"
 #include "settings/SettingsActivity.h"
 #include "util/FullScreenMessageActivity.h"
 
@@ -191,7 +192,7 @@ void ActivityManager::goToLibrary(bool fromReader) {
 }
 
 void ActivityManager::goToBrowser() {
-  replaceActivity(std::make_unique<OpdsBookBrowserActivity>(renderer, mappedInput));
+  replaceActivity(std::make_unique<OpdsServerListActivity>(renderer, mappedInput, /*pickerMode=*/true));
 }
 
 void ActivityManager::goToReader(std::string path) {

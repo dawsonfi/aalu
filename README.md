@@ -274,6 +274,7 @@ AALU is **actively developed** — I'm using it as my daily reader and shaping i
 - ✅ End-of-Book next-book suggestions (EPUB + XTC readers)
 - ✅ Selection popup for multi-option settings (Settings + Status Bar)
 - ✅ Wi-Fi signal-strength bars (network list + connected screen)
+- ✅ Multiple OPDS catalog servers — add/edit/delete named servers (each with its own URL + credentials), replacing the single-server screen
 - ✅ "Never" sleep-timeout option (Settings → System → Time to sleep) for reading while charging
 - ✅ Finished-book automation — clear-from-recents and move-to-`/read/` System toggles
 - ✅ "Bookmark added / removed" on-screen confirmation when toggling a bookmark

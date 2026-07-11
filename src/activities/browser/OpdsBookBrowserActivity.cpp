@@ -219,22 +219,21 @@ void OpdsBookBrowserActivity::render(RenderLock&&) {
 }
 
 void OpdsBookBrowserActivity::fetchFeed(const std::string& path) {
-  const char* serverUrl = SETTINGS.opdsServerUrl;
-  if (strlen(serverUrl) == 0) {
+  if (server.url.empty()) {
     state = BrowserState::ERROR;
     errorMessage = tr(STR_NO_SERVER_URL);
     requestUpdate();
     return;
   }
 
-  std::string url = UrlUtils::buildUrl(serverUrl, path);
+  std::string url = UrlUtils::buildUrl(server.url.c_str(), path);
   LOG_DBG("OPDS", "Fetching: %s", url.c_str());
 
   OpdsParser parser;
 
   {
     OpdsParserStream stream{parser};
-    if (!HttpDownloader::fetchUrl(url, stream, SETTINGS.opdsUsername, SETTINGS.opdsPassword)) {
+    if (!HttpDownloader::fetchUrl(url, stream, server.username.c_str(), server.password.c_str())) {
       state = BrowserState::ERROR;
       errorMessage = tr(STR_FETCH_FEED_FAILED);
       requestUpdate();

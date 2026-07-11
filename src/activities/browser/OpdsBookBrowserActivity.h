@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "../Activity.h"
+#include "OpdsServerStore.h"
 #include "util/ButtonNavigator.h"
 
 /**
@@ -24,8 +25,8 @@ class OpdsBookBrowserActivity final : public Activity {
     ERROR            // Error state with message
   };
 
-  explicit OpdsBookBrowserActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
-      : Activity("OpdsBookBrowser", renderer, mappedInput) {}
+  explicit OpdsBookBrowserActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, const OpdsServer& server)
+      : Activity("OpdsBookBrowser", renderer, mappedInput), server(server) {}
 
   void onEnter() override;
   void onExit() override;
@@ -34,6 +35,7 @@ class OpdsBookBrowserActivity final : public Activity {
 
  private:
   ButtonNavigator buttonNavigator;
+  OpdsServer server;
   BrowserState state = BrowserState::LOADING;
   std::vector<OpdsEntry> entries;
   std::vector<std::string> navigationHistory;  // Stack of previous feed paths for back navigation
