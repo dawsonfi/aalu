@@ -209,7 +209,26 @@ bool Section::createSectionFile(const int fontId, const float lineCompression, c
       [this, &lut](std::unique_ptr<Page> page) { lut.emplace_back(this->onPageComplete(std::move(page))); },
       embeddedStyle, contentBase, imageBasePath, imageRendering, popupFn, cssParser);
   Hyphenator::setPreferredLanguage(epub->getLanguage());
-  success = visitor.parseAndBuildPages();
+  if (visitor.beginParse()) {
+    int step = 0;
+    for (;;) {
+      const auto status = visitor.parseStep();
+      if (status == ChapterHtmlSlimParser::ParseStatus::Error) {
+        visitor.abortParse();
+        success = false;
+        break;
+      }
+      if (status == ChapterHtmlSlimParser::ParseStatus::Done) {
+        success = visitor.finishParse();
+        break;
+      }
+      if ((++step & 0x7) == 0) {
+        delay(1);
+      }
+    }
+  } else {
+    success = false;
+  }
 
   Storage.remove(tmpHtmlPath.c_str());
   if (!success) {
