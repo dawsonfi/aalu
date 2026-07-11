@@ -1,18 +1,18 @@
 #pragma once
+#include <GfxRenderer.h>
 #include <I18n.h>
 
 #include <functional>
 #include <string>
 #include <vector>
 
-#include <GfxRenderer.h>
-
 #include "MappedInputManager.h"
 #include "components/UITheme.h"
 
 class OptionPopup {
  public:
-  void show(StrId titleId, const StrId* optionIds, int optionCount, int currentIndex, std::function<void(int)> onSelect) {
+  void show(StrId titleId, const StrId* optionIds, int optionCount, int currentIndex,
+            std::function<void(int)> onSelect) {
     title = I18N.get(titleId);
     ownedStrings.resize(optionCount);
     for (int i = 0; i < optionCount; i++) {
@@ -23,7 +23,8 @@ class OptionPopup {
     active = true;
   }
 
-  void show(StrId titleId, const std::vector<std::string>& options, int currentIndex, std::function<void(int)> onSelect) {
+  void show(StrId titleId, const std::vector<std::string>& options, int currentIndex,
+            std::function<void(int)> onSelect) {
     title = I18N.get(titleId);
     ownedStrings = options;
     selectedIndex = currentIndex;
