@@ -92,6 +92,7 @@ Everything below is on top of what Seek Reader / CrossPoint already do.
 - **Single-allocation page arena.** Each rendered line of text packs its words into one contiguous heap block instead of ~250 small allocations per page — sharply cutting the heap fragmentation that starved the e-ink renderer and network stack on this PSRAM-less device.
 - **Faster, reliable downloads (fonts, OPDS).** The download stack moved to `esp_http_client` with a kept-alive TLS connection and HTTPS verified against the bundled Mozilla CA roots — one reused connection instead of a fresh handshake per request. Paired with the page arena above, the fast stack fits the ~380KB heap without OOM.
 - **OTA without a reset.** Firmware update forces full Wi-Fi TX power and disables modem-sleep *before* the connection (not just the download body), so the TLS handshake no longer stalls on a weak/mesh link — you no longer have to reboot the device before an update will start.
+- **Render the first page while the chapter builds.** A freshly-opened (uncached) chapter now lays out just enough pages to show your landing page, then finishes the rest in the background while you read — instead of blocking on the whole chapter before the first page appears. Page turns that get ahead of the background builder lay out on demand, the progress bar shows a byte-ratio estimate until the exact count is known, and the section cache finalizes once the build completes (so reopening is instant). Percent jumps, footnote/ToC anchors and settings-change repagination still build the whole chapter up front (they need the final page count), behind the usual indexing popup.
 - **Responsive chapter indexing.** Laying out a chapter yields to the scheduler between chunks (so a slow downloaded-font index of a large chapter no longer trips the watchdog / "wakes" the device), and the eager next-chapter pre-index that used to stall mid-read has been removed.
 - **Connect to the nearest mesh node.** WiFi now scans every channel and joins the *strongest* access point instead of the first one it hears, so on multi-node mesh systems (e.g. TP-Link Deco) the reader links to the closest node rather than a distant one — much stronger signal and far more reliable downloads.
 
@@ -270,6 +271,7 @@ AALU is **actively developed** — I'm using it as my daily reader and shaping i
 - ✅ End-of-Book next-book suggestions (EPUB + XTC readers)
 - ✅ Selection popup for multi-option settings (Settings + Status Bar)
 - ✅ Wi-Fi signal-strength bars (network list + connected screen)
+- ✅ Render the first page while the rest of the chapter builds in the background (incremental section build)
 - ✅ Responsive chapter indexing — yields between chunks, eager next-chapter pre-index removed
 - ✅ Specific on-screen reason when an SD firmware image fails validation
 - ✅ SD-card `update.bin` flashing + Up + Power recovery mode (no cable required; first-install path for locked devices)

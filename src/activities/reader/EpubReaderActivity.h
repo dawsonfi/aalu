@@ -85,6 +85,15 @@ class EpubReaderActivity final : public Activity {
   uint8_t pageLoadRetryCount = 0;
   static constexpr uint8_t MAX_PAGE_LOAD_RETRIES = 3;
 
+  // Incremental section build (render page 1 while the rest lays out behind it). Pages laid out
+  // per pump: on the render path catching up to the page being shown, and per loop() tick for the
+  // background build of a large chapter. Kept small so a background chunk never noticeably delays
+  // input or a pending render. Show the indexing popup only for a deep resume/jump that must lay
+  // out more than this many pages up front, so an ordinary landing stays popup-free.
+  static constexpr int BUILD_PAGES_PER_CHUNK = 8;
+  static constexpr int BACKGROUND_BUILD_PAGES_PER_TICK = 2;
+  static constexpr int BUILD_POPUP_PAGE_THRESHOLD = 20;
+
   void renderContents(std::unique_ptr<Page> page, int orientedMarginTop, int orientedMarginRight,
                       int orientedMarginBottom, int orientedMarginLeft);
   void renderStatusBar() const;

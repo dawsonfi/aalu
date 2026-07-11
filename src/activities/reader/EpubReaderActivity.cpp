@@ -135,7 +135,7 @@ void EpubReaderActivity::onExit() {
   // End reading stats session — compute current progress
   {
     const int currentPage = section ? section->currentPage : 0;
-    const int pageCount = section ? section->pageCount : 0;
+    const int pageCount = section ? section->estimatedTotalPages() : 0;
     const uint8_t prog = static_cast<uint8_t>(epub->progressPercent(currentSpineIndex, currentPage, pageCount));
     StatsManager.endSession(prog, sessionPagesTurned);  // new
   }
@@ -155,6 +155,18 @@ void EpubReaderActivity::loop() {
     // Should never happen
     finish();
     return;
+  }
+
+  // Drive a still-building section forward a little each tick so a large chapter finishes laying
+  // out in the background while the reader shows the pages already built. Under the render lock so
+  // it never races render()/pageTurn() mutating the section; skipped when the lock is already held,
+  // and re-checked under the lock since another path may have finished the build in between.
+  if (section && section->isBuilding() && !RenderLock::peek()) {
+    RenderLock lock(*this);
+    if (section && section->isBuilding() && !section->buildSomeMore(BACKGROUND_BUILD_PAGES_PER_TICK)) {
+      section.reset();
+      requestUpdate();
+    }
   }
 
   if (automaticPageTurnActive) {
@@ -223,11 +235,11 @@ void EpubReaderActivity::loop() {
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm) &&
       mappedInput.getHeldTime() < ReaderUtils::QUICK_SETTINGS_LONG_PRESS_MS) {
     const int currentPage = section ? section->currentPage + 1 : 0;
-    const int totalPages = section ? section->pageCount : 0;
-    const int bookProgressPercent =
-        (epub->getBookSize() > 0 && section)
-            ? clampPercent(epub->progressPercent(currentSpineIndex, section->currentPage, section->pageCount))
-            : 0;
+    const int totalPages = section ? section->estimatedTotalPages() : 0;
+    const int bookProgressPercent = (epub->getBookSize() > 0 && section)
+                                        ? clampPercent(epub->progressPercent(currentSpineIndex, section->currentPage,
+                                                                             section->estimatedTotalPages()))
+                                        : 0;
 
     const bool hasDictionary = Dictionary::exists();
     const bool hasLookupHistory = hasDictionary && LookupHistory::hasHistory(epub->getCachePath());
@@ -506,10 +518,10 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
     }
 
     case EpubReaderMenuActivity::MenuAction::GO_TO_PERCENT: {
-      const int initialPercent =
-          (epub && epub->getBookSize() > 0 && section)
-              ? clampPercent(epub->progressPercent(currentSpineIndex, section->currentPage, section->pageCount))
-              : 0;
+      const int initialPercent = (epub && epub->getBookSize() > 0 && section)
+                                     ? clampPercent(epub->progressPercent(currentSpineIndex, section->currentPage,
+                                                                          section->estimatedTotalPages()))
+                                     : 0;
       startActivityForResult(
           std::make_unique<EpubReaderPercentSelectionActivity>(renderer, mappedInput, initialPercent),
           [this](const ActivityResult& result) {
@@ -560,7 +572,7 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
         if (epub && section) {
           uint16_t backupSpine = currentSpineIndex;
           uint16_t backupPage = section->currentPage;
-          uint16_t backupPageCount = section->pageCount;
+          uint16_t backupPageCount = section->estimatedTotalPages();
           section.reset();
           epub->clearCache();
           epub->setupCacheDir();
@@ -581,7 +593,7 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
     case EpubReaderMenuActivity::MenuAction::SYNC: {
       if (KOREADER_STORE.hasCredentials()) {
         const int currentPage = section ? section->currentPage : 0;
-        const int totalPages = section ? section->pageCount : 0;
+        const int totalPages = section ? section->estimatedTotalPages() : 0;
 
         // --- ADDED: Read exact DOM path from the SD Card cache ---
         std::string exactXPath = "";
@@ -615,7 +627,7 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
                                RenderLock lock(*this);
                                if (section) {
                                  cachedSpineIndex = currentSpineIndex;
-                                 cachedChapterTotalPageCount = section->pageCount;
+                                 cachedChapterTotalPageCount = section->estimatedTotalPages();
                                  nextPageNumber = section->currentPage;
                                }
                                section.reset();
@@ -711,7 +723,7 @@ void EpubReaderActivity::applyOrientation(const uint8_t orientation) {
     RenderLock lock(*this);
     if (section) {
       cachedSpineIndex = currentSpineIndex;
-      cachedChapterTotalPageCount = section->pageCount;
+      cachedChapterTotalPageCount = section->estimatedTotalPages();
       nextPageNumber = section->currentPage;
     }
 
@@ -745,7 +757,7 @@ void EpubReaderActivity::toggleAutoPageTurn(const uint8_t selectedPageTurnOption
     RenderLock lock(*this);
     if (section) {
       cachedSpineIndex = currentSpineIndex;
-      cachedChapterTotalPageCount = section->pageCount;
+      cachedChapterTotalPageCount = section->estimatedTotalPages();
       nextPageNumber = section->currentPage;
     }
     section.reset();
@@ -755,7 +767,7 @@ void EpubReaderActivity::toggleAutoPageTurn(const uint8_t selectedPageTurnOption
 void EpubReaderActivity::pageTurn(bool isForwardTurn) {
   if (isForwardTurn) {
     sessionPagesTurned++;  // new
-    if (section->currentPage < section->pageCount - 1) {
+    if (section->currentPage < section->pageCount - 1 || section->isBuilding()) {
       section->currentPage++;
     } else {
       // We don't want to delete the section mid-render, so grab the semaphore
@@ -843,11 +855,39 @@ void EpubReaderActivity::render(RenderLock&& lock) {
                                   SETTINGS.extraParagraphSpacing, SETTINGS.paragraphAlignment, viewportWidth,
                                   viewportHeight, SETTINGS.hyphenationEnabled, SETTINGS.embeddedStyle,
                                   SETTINGS.imageRendering)) {
-      const auto popupFn = [this]() { GUI.drawPopup(renderer, tr(STR_INDEXING)); };
-      if (!section->createSectionFile(SETTINGS.getReaderFontId(), SETTINGS.getReaderLineCompression(),
-                                      SETTINGS.extraParagraphSpacing, SETTINGS.paragraphAlignment, viewportWidth,
-                                      viewportHeight, SETTINGS.hyphenationEnabled, SETTINGS.embeddedStyle,
-                                      SETTINGS.imageRendering, popupFn)) {
+      // Percent jumps, anchor jumps (footnotes/ToC) and settings-change repagination all need the
+      // whole chapter up front (final page count / anchor map), so they build fully behind the
+      // indexing popup. A plain resume lays out just enough to reach the landing page and lets
+      // loop() build the rest behind it, so the first page appears without waiting on the chapter.
+      const bool needsFullBuild = pendingPercentJump || !pendingAnchor.empty() ||
+                                  (cachedChapterTotalPageCount > 0 && currentSpineIndex == cachedSpineIndex);
+      bool built;
+      if (needsFullBuild) {
+        GUI.drawPopup(renderer, tr(STR_INDEXING));
+        pagesUntilFullRefresh = 1;
+        const auto popupFn = [this]() { GUI.drawPopup(renderer, tr(STR_INDEXING)); };
+        built = section->createSectionFile(SETTINGS.getReaderFontId(), SETTINGS.getReaderLineCompression(),
+                                           SETTINGS.extraParagraphSpacing, SETTINGS.paragraphAlignment, viewportWidth,
+                                           viewportHeight, SETTINGS.hyphenationEnabled, SETTINGS.embeddedStyle,
+                                           SETTINGS.imageRendering, popupFn);
+      } else {
+        // UINT16_MAX (resume to last page) makes target huge, so the loop below builds to
+        // completion; an ordinary page target builds just past it. Show the popup only for a deep
+        // resume so a shallow landing stays popup-free.
+        const int target = (nextPageNumber < 0) ? 0 : nextPageNumber;
+        if (target > BUILD_POPUP_PAGE_THRESHOLD) {
+          GUI.drawPopup(renderer, tr(STR_INDEXING));
+          pagesUntilFullRefresh = 1;
+        }
+        built = section->startBuild(SETTINGS.getReaderFontId(), SETTINGS.getReaderLineCompression(),
+                                    SETTINGS.extraParagraphSpacing, SETTINGS.paragraphAlignment, viewportWidth,
+                                    viewportHeight, SETTINGS.hyphenationEnabled, SETTINGS.embeddedStyle,
+                                    SETTINGS.imageRendering);
+        while (built && !section->isBuildComplete() && static_cast<int>(section->pageCount) <= target) {
+          built = section->buildSomeMore(BUILD_PAGES_PER_CHUNK);
+        }
+      }
+      if (!built) {
         // A build failure here means an invalid/corrupt EPUB that failed to parse. Surface an
         // explicit error instead of leaving the "Indexing" popup on screen with no way forward.
         LOG_ERR("ERS", "Failed to index section %d (invalid book)", currentSpineIndex);
@@ -884,6 +924,30 @@ void EpubReaderActivity::render(RenderLock&& lock) {
       section->currentPage = newPage;
       pendingPercentJump = false;
     }
+  }
+
+  // Extend an in-progress incremental build until the page we're about to show is laid out. Runs
+  // every render, so it also covers a forward turn that got ahead of the background builder;
+  // already-built pages do no work here.
+  if (section->isBuilding()) {
+    bool ok = true;
+    while (ok && !section->isBuildComplete() && section->currentPage >= static_cast<int>(section->pageCount)) {
+      ok = section->buildSomeMore(BUILD_PAGES_PER_CHUNK);
+    }
+    if (!ok) {
+      LOG_ERR("ERS", "Failed during incremental section build");
+      section.reset();
+      automaticPageTurnActive = false;
+      requestUpdate();
+      return;
+    }
+  }
+
+  // Once the real page count is known, clamp a target that lands past the end (the UINT16_MAX
+  // "last page" sentinel from backward chapter navigation, or a stale saved position).
+  if (!section->isBuilding() && section->pageCount > 0 &&
+      section->currentPage >= static_cast<int>(section->pageCount)) {
+    section->currentPage = section->pageCount - 1;
   }
 
   renderer.clearScreen();
@@ -933,11 +997,11 @@ void EpubReaderActivity::render(RenderLock&& lock) {
   // bookmark and screenshot re-renders, and writeAtomic is several FAT ops for 6 bytes.
   // Every real page turn changes currentPage, so progress durability is unaffected.
   if (currentSpineIndex != lastSavedSpineIndex || section->currentPage != lastSavedPage ||
-      section->pageCount != lastSavedPageCount) {
-    saveProgress(currentSpineIndex, section->currentPage, section->pageCount);
+      section->estimatedTotalPages() != lastSavedPageCount) {
+    saveProgress(currentSpineIndex, section->currentPage, section->estimatedTotalPages());
     lastSavedSpineIndex = currentSpineIndex;
     lastSavedPage = section->currentPage;
-    lastSavedPageCount = section->pageCount;
+    lastSavedPageCount = section->estimatedTotalPages();
   }
 
   if (qsState != QuickSettingsState::CLOSED) {
@@ -1098,7 +1162,7 @@ int EpubReaderActivity::readerClockBandHeight() const {
 void EpubReaderActivity::renderStatusBar() const {
   // Calculate progress in book
   const int currentPage = section->currentPage + 1;
-  const float pageCount = section->pageCount;
+  const float pageCount = section->estimatedTotalPages();
   const float sectionChapterProg = (pageCount > 0) ? (static_cast<float>(currentPage) / pageCount) : 0;
   const float bookProgress = epub->calculateProgress(currentSpineIndex, sectionChapterProg) * 100;
 
@@ -1455,7 +1519,7 @@ void EpubReaderActivity::closeAndApplyQuickSettings() {
     RenderLock lock(*this);
     cachedSpineIndex = currentSpineIndex;
     if (section) {
-      cachedChapterTotalPageCount = section->pageCount;
+      cachedChapterTotalPageCount = section->estimatedTotalPages();
     }
     // Force EPUB engine to recalculate pages with the new global settings
     section.reset();
