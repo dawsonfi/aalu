@@ -81,7 +81,7 @@ bool SdFirmwareUpdateActivity::validateFirmware() {
     } else if (vr == firmware_flash::Result::TOO_SMALL) {
       errorMessage = tr(STR_FIRMWARE_TOO_SMALL);
     } else {
-      errorMessage = tr(STR_INVALID_FIRMWARE);
+      errorMessage = std::string(tr(STR_INVALID_FIRMWARE)) + " (" + firmware_flash::resultName(vr) + ")";
     }
     return false;
   }
