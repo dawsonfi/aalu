@@ -76,6 +76,12 @@ class EpubReaderActivity final : public Activity {
   int lastSavedPage = -1;
   int lastSavedPageCount = -1;
 
+  // Consecutive page-load failures. Each failure drops the section and rebuilds on the next
+  // render (recovers a transiently corrupt cache); capped so a persistently bad page can't spin
+  // forever on a blank screen.
+  uint8_t pageLoadRetryCount = 0;
+  static constexpr uint8_t MAX_PAGE_LOAD_RETRIES = 3;
+
   void renderContents(std::unique_ptr<Page> page, int orientedMarginTop, int orientedMarginRight,
                       int orientedMarginBottom, int orientedMarginLeft);
   void renderStatusBar() const;

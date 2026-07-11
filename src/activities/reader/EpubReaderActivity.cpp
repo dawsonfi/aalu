@@ -823,7 +823,14 @@ void EpubReaderActivity::render(RenderLock&& lock) {
                                       SETTINGS.extraParagraphSpacing, SETTINGS.paragraphAlignment, viewportWidth,
                                       viewportHeight, SETTINGS.hyphenationEnabled, SETTINGS.embeddedStyle,
                                       SETTINGS.imageRendering, popupFn)) {
+        // A build failure here means an invalid/corrupt EPUB that failed to parse. Surface an
+        // explicit error instead of leaving the "Indexing" popup on screen with no way forward.
+        LOG_ERR("ERS", "Failed to index section %d (invalid book)", currentSpineIndex);
         section.reset();
+        automaticPageTurnActive = false;
+        renderer.clearScreen();
+        GUI.drawPopup(renderer, tr(STR_INDEX_FAILED));
+        renderer.displayBuffer(HalDisplay::FAST_REFRESH);
         return;
       }
     }
@@ -869,12 +876,25 @@ void EpubReaderActivity::render(RenderLock&& lock) {
   {
     auto p = section->loadPageFromSectionFile();
     if (!p) {
+      LOG_ERR("ERS", "Failed to load page from section file");
+      automaticPageTurnActive = false;
+      // Retrying rebuilds a transiently corrupt section and usually recovers, but a page that
+      // keeps failing would loop forever on a blank screen, so bound the retries before giving up.
+      const bool giveUp = ++pageLoadRetryCount > MAX_PAGE_LOAD_RETRIES;
       section->clearCache();
       section.reset();
-      requestUpdate();
-      automaticPageTurnActive = false;
+      if (giveUp) {
+        LOG_ERR("ERS", "Page load retry limit reached, aborting");
+        pageLoadRetryCount = 0;  // reset so a later user-initiated navigation can try afresh
+        renderer.clearScreen();
+        renderer.drawCenteredText(UI_12_FONT_ID, 300, tr(STR_PAGE_LOAD_ERROR), true, EpdFontFamily::BOLD);
+        renderer.displayBuffer();
+        return;
+      }
+      requestUpdate();  // try again after clearing cache
       return;
     }
+    pageLoadRetryCount = 0;  // reset once a page loads cleanly
 
     currentPageFootnotes = std::move(p->footnotes);
 
