@@ -64,6 +64,70 @@ int clampPercent(int percent) {
   return percent;
 }
 
+// SD folder that finished books are relocated into when moveFinishedToReadFolder is on.
+constexpr char READ_FOLDER[] = "/read";
+
+bool isInReadFolder(const std::string& path) {
+  constexpr size_t n = sizeof(READ_FOLDER) - 1;
+  return path.size() > n && path.compare(0, n, READ_FOLDER) == 0 && path[n] == '/';
+}
+
+// Pick a non-colliding destination inside /read/ for a finished book ("name.epub" -> "name (2).epub").
+std::string buildReadFolderDestination(const std::string& srcPath) {
+  const size_t lastSlash = srcPath.rfind('/');
+  const std::string filename = (lastSlash != std::string::npos) ? srcPath.substr(lastSlash + 1) : srcPath;
+  Storage.mkdir(READ_FOLDER);
+  std::string dstPath = std::string(READ_FOLDER) + "/" + filename;
+  if (!Storage.exists(dstPath.c_str())) {
+    return dstPath;
+  }
+  const size_t dotPos = filename.rfind('.');
+  const std::string base = (dotPos != std::string::npos) ? filename.substr(0, dotPos) : filename;
+  const std::string ext = (dotPos != std::string::npos) ? filename.substr(dotPos) : "";
+  int suffix = 2;
+  do {
+    dstPath = std::string(READ_FOLDER) + "/" + base + " (" + std::to_string(suffix) + ")" + ext;
+    suffix++;
+  } while (Storage.exists(dstPath.c_str()) && suffix < 100);
+  return dstPath;
+}
+
+// Relocate a finished book and its cache dir into /read/, repointing the recents entry (only if it
+// was still listed) and the resume pointer. On book-rename failure everything is left in place; a
+// failed cache-dir rename is non-fatal (the book just re-indexes at its new path).
+void moveFinishedBookToReadFolder(const std::string& srcPath, const std::string& dstPath,
+                                  const std::string& oldCachePath, const std::string& title, const std::string& author,
+                                  const std::string& oldThumb, const std::string& seriesName,
+                                  const std::string& seriesIndex) {
+  LOG_INF("ERS", "Moving finished book: %s -> %s", srcPath.c_str(), dstPath.c_str());
+  if (!Storage.rename(srcPath.c_str(), dstPath.c_str())) {
+    LOG_ERR("ERS", "Failed to move finished book to Read folder");
+    return;
+  }
+
+  std::string newThumb = oldThumb;
+  const size_t epubPos = oldCachePath.rfind("/epub_");
+  if (epubPos != std::string::npos && Storage.exists(oldCachePath.c_str())) {
+    const std::string cacheDir = oldCachePath.substr(0, epubPos);
+    const std::string newCachePath = cacheDir + "/epub_" + std::to_string(FsHelpers::cachePathHash(dstPath));
+    if (Storage.rename(oldCachePath.c_str(), newCachePath.c_str())) {
+      if (newThumb.compare(0, oldCachePath.size(), oldCachePath) == 0) {
+        newThumb = newCachePath + newThumb.substr(oldCachePath.size());
+      }
+    } else {
+      LOG_ERR("ERS", "Failed to rename cache dir (non-fatal): %s", oldCachePath.c_str());
+    }
+  }
+
+  if (RECENT_BOOKS.removeBook(srcPath)) {
+    RECENT_BOOKS.addBook(dstPath, title, author, newThumb, seriesName, seriesIndex);
+  }
+  if (APP_STATE.openEpubPath == srcPath) {
+    APP_STATE.openEpubPath = dstPath;
+    APP_STATE.saveToFile();
+  }
+}
+
 }  // namespace
 
 void EpubReaderActivity::onEnter() {
@@ -148,7 +212,20 @@ void EpubReaderActivity::onExit() {
   APP_STATE.readerActivityLoadCount = 0;
   APP_STATE.saveToFile();
   section.reset();
-  epub.reset();
+  if (pendingReadFolderMove && epub) {
+    const std::string srcPath = epub->getPath();
+    const std::string oldCachePath = epub->getCachePath();
+    const std::string title = epub->getTitle();
+    const std::string author = epub->getAuthor();
+    const std::string oldThumb = epub->getThumbBmpPath();
+    const std::string seriesName = epub->getSeriesName();
+    const std::string seriesIndex = epub->getSeriesIndex();
+    const std::string dstPath = buildReadFolderDestination(srcPath);
+    epub.reset();  // release the Epub (and its open handles) before renaming on the SD card
+    moveFinishedBookToReadFolder(srcPath, dstPath, oldCachePath, title, author, oldThumb, seriesName, seriesIndex);
+  } else {
+    epub.reset();
+  }
 }
 
 void EpubReaderActivity::loop() {
@@ -828,6 +905,21 @@ void EpubReaderActivity::render(RenderLock&& lock) {
   // edge case handling for sub-zero spine index
   if (currentSpineIndex < 0) currentSpineIndex = 0;
   if (currentSpineIndex > epub->getSpineItemsCount()) currentSpineIndex = epub->getSpineItemsCount();
+
+  // Finished-book automation: drop this book from Recents on the End-of-Book transition (re-add if
+  // paged back in), and arm the /read/ relocation for onExit(). Transition-guarded on
+  // recentsEntryRemoved so there are no per-frame writes while the End-of-Book screen shows.
+  const bool atEndOfBook = currentSpineIndex > 0 && currentSpineIndex >= epub->getSpineItemsCount();
+  if (SETTINGS.removeReadBooksFromRecents) {
+    if (atEndOfBook && !recentsEntryRemoved) {
+      recentsEntryRemoved = RECENT_BOOKS.removeBook(epub->getPath());
+    } else if (!atEndOfBook && recentsEntryRemoved) {
+      RECENT_BOOKS.addBook(epub->getPath(), epub->getTitle(), epub->getAuthor(), epub->getThumbBmpPath(),
+                           epub->getSeriesName(), epub->getSeriesIndex());
+      recentsEntryRemoved = false;
+    }
+  }
+  pendingReadFolderMove = atEndOfBook && SETTINGS.moveFinishedToReadFolder && !isInReadFolder(epub->getPath());
 
   if (currentSpineIndex == epub->getSpineItemsCount()) {
     endOfBookOptions.loadOnce(epub->getPath());

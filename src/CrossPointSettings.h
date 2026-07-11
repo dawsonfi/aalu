@@ -220,6 +220,10 @@ class CrossPointSettings {
   uint8_t embeddedStyle = 1;
   // Show hidden files/directories (starting with '.') in the file browser (0 = hidden, 1 = show)
   uint8_t showHiddenFiles = 0;
+  // Drop a book from the Recent Books list once its End-of-Book screen is reached (0 = keep)
+  uint8_t removeReadBooksFromRecents = 0;
+  // Relocate a finished book into the /read/ folder on exit (0 = leave in place)
+  uint8_t moveFinishedToReadFolder = 0;
   // Image rendering mode in EPUB reader
   uint8_t imageRendering = IMAGES_DISPLAY;
   uint8_t homeStyle = HOME_FLAT;

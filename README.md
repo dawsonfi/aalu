@@ -50,6 +50,7 @@ Everything below is on top of what Seek Reader / CrossPoint already do.
 - **Sharper covers.** Thumbnails are generated at their exact 2:3 on-screen size and Atkinson-dithered, so covers render crisp 1:1 instead of upscaled and smeared. Existing covers auto-upgrade to the sharper version as you browse — or all at once via long-press Back on the Bookshelf — with no cache wipe.
 - **Recents shows only unfinished books.** Once a book is finished it drops off the home recents and the Carrousel automatically, so "continue reading" always lands on something you haven't finished yet.
 - **Remove from recents.** Long-press Confirm (≥1 second) on a recents tile to clear it from home without deleting the file or losing your progress cache.
+- **Auto-tidy finished books (optional).** Two System settings, off by default: *Clear Read Books from Recent List* drops a book from Recents the moment you hit its End-of-Book screen (re-added if you page back in), and *Move Finished Books to Read Folder* relocates a finished book (and its cache) into `/read/` on exit, keeping its recents entry and progress pointed at the new location.
 
 ### Reading statistics, redone
 - **Six stat views**, cycled with the Right button: Reading list, Finished list, Badges, Pet, Calendar, and a year-in-review "Wrapped".
@@ -273,6 +274,7 @@ AALU is **actively developed** — I'm using it as my daily reader and shaping i
 - ✅ End-of-Book next-book suggestions (EPUB + XTC readers)
 - ✅ Selection popup for multi-option settings (Settings + Status Bar)
 - ✅ Wi-Fi signal-strength bars (network list + connected screen)
+- ✅ Finished-book automation — clear-from-recents and move-to-`/read/` System toggles
 - ✅ "Bookmark added / removed" on-screen confirmation when toggling a bookmark
 - ✅ Crash-safe atomic reading-progress writes (temp-file + rename; EPUB/XTC/TXT)
 - ✅ Crash report screen on panic reboot (reason on-screen + `crash_report.txt`)

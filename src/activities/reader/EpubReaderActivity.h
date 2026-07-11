@@ -40,6 +40,12 @@ class EpubReaderActivity final : public Activity {
   unsigned long bookmarkMessageTime = 0UL;
   static constexpr unsigned long BOOKMARK_MESSAGE_MS = 1500UL;
 
+  // Finished-book automation (System settings). recentsEntryRemoved tracks that we dropped this
+  // book from Recents at the End-of-Book screen (re-added if paged back in); pendingReadFolderMove
+  // arms an onExit relocation of the finished book into /read/.
+  bool recentsEntryRemoved = false;
+  bool pendingReadFolderMove = false;
+
   EndOfBookOptions endOfBookOptions;
 
   // --- QUICK SETTINGS OVERLAY ---
