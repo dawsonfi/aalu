@@ -9,6 +9,7 @@
 #include "boot_sleep/SleepActivity.h"
 #include "browser/OpdsBookBrowserActivity.h"
 #include "home/BookshelfActivity.h"
+#include "home/CrashActivity.h"
 #include "home/FileBrowserActivity.h"
 #include "home/HomeActivity.h"
 #include "network/CrossPointWebServerActivity.h"
@@ -173,6 +174,8 @@ void ActivityManager::goToFileTransfer() {
 void ActivityManager::goToSettings() { replaceActivity(std::make_unique<SettingsActivity>(renderer, mappedInput)); }
 
 void ActivityManager::goToBookshelf() { replaceActivity(std::make_unique<BookshelfActivity>(renderer, mappedInput)); }
+
+void ActivityManager::goToCrashReport() { replaceActivity(std::make_unique<CrashActivity>(renderer, mappedInput)); }
 
 void ActivityManager::goToLibrary(bool fromReader) {
   if (SETTINGS.browseMode == CrossPointSettings::BROWSE_FILE_BROWSER) {

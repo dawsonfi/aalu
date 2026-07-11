@@ -245,7 +245,6 @@ void setup() {
   }
 
   HalSystem::checkPanic();
-  HalSystem::clearPanic();  // TODO: move this to an activity when we have one to display the panic info
 
   SETTINGS.loadFromFile();
   I18N.setLanguage(Language::EN);
@@ -310,6 +309,14 @@ void setup() {
   APP_STATE.loadFromFile();
   RECENT_BOOKS.loadFromFile();
   ReadingStatsManager::getInstance().load();
+
+  // If we rebooted from a panic, show the crash report screen so the reason isn't lost silently.
+  // checkPanic() above already dumped the full report to crash_report.txt; the activity reads the
+  // short reason and clears the panic state. Back returns home.
+  if (HalSystem::isRebootFromPanic()) {
+    activityManager.goToCrashReport();
+    return;
+  }
 
   // Boot to home screen if no book is open, last sleep was not from reader, back button is held, or reader activity
   // crashed (indicated by readerActivityLoadCount > 0)

@@ -80,6 +80,7 @@ class ActivityManager {
   void goToFileTransfer();
   void goToSettings();
   void goToBookshelf();
+  void goToCrashReport();
   // Opens the library in the user's chosen browse mode (bookshelf or file browser).
   // When fromReader is true and a book is open, the file browser opens at that book's folder.
   void goToLibrary(bool fromReader = false);

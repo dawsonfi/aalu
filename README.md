@@ -85,6 +85,7 @@ Everything below is on top of what Seek Reader / CrossPoint already do.
 ### Installing & recovery
 - **SD-card firmware update** — drop `update.bin` on the SD-card root and install it from Settings → SD card firmware update, no cable required. Also works as the first-install path on a locked stock device (the stock bootloader picks it up at boot).
 - **Recovery mode** — hold **Up + Power** at boot to jump straight to the SD update screen, even if the normal UI won't load.
+- **Crash report screen** — if the firmware reboots from a panic (watchdog/exception), the next boot shows the crash reason on-screen instead of silently restarting; the full report is also saved to `crash_report.txt` on the SD card for bug reports.
 
 ### Stability
 - **Heap-aware activity transitions** — the home screen's 48KB framebuffer cache is dropped before launching any sub-activity, so heap-hungry features (File Transfer's WiFi + WebServer + WebSockets) get the room they need.
@@ -271,6 +272,7 @@ AALU is **actively developed** — I'm using it as my daily reader and shaping i
 - ✅ End-of-Book next-book suggestions (EPUB + XTC readers)
 - ✅ Selection popup for multi-option settings (Settings + Status Bar)
 - ✅ Wi-Fi signal-strength bars (network list + connected screen)
+- ✅ Crash report screen on panic reboot (reason on-screen + `crash_report.txt`)
 - ✅ Render the first page while the rest of the chapter builds in the background (incremental section build)
 - ✅ Responsive chapter indexing — yields between chunks, eager next-chapter pre-index removed
 - ✅ Specific on-screen reason when an SD firmware image fails validation
