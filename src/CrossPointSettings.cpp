@@ -270,6 +270,8 @@ unsigned long CrossPointSettings::getSleepTimeoutMs() const {
       return 15UL * 60 * 1000;
     case SLEEP_30_MIN:
       return 30UL * 60 * 1000;
+    case SLEEP_NEVER:
+      return ~0UL;  // sentinel: the inactivity delta never reaches this, so auto-sleep never fires
   }
 }
 

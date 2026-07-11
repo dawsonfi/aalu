@@ -106,10 +106,10 @@ inline const std::vector<SettingInfo>& getSettingsList() {
                                   "shortPwrBtn", StrId::STR_CAT_CONTROLS));
 
     // --- System ---
-    v.push_back(
-        SettingInfo::Enum(StrId::STR_TIME_TO_SLEEP, &CrossPointSettings::sleepTimeout,
-                          {StrId::STR_MIN_1, StrId::STR_MIN_5, StrId::STR_MIN_10, StrId::STR_MIN_15, StrId::STR_MIN_30},
-                          "sleepTimeout", StrId::STR_CAT_SYSTEM));
+    v.push_back(SettingInfo::Enum(
+        StrId::STR_TIME_TO_SLEEP, &CrossPointSettings::sleepTimeout,
+        {StrId::STR_MIN_1, StrId::STR_MIN_5, StrId::STR_MIN_10, StrId::STR_MIN_15, StrId::STR_MIN_30, StrId::STR_NEVER},
+        "sleepTimeout", StrId::STR_CAT_SYSTEM));
     v.push_back(SettingInfo::Toggle(StrId::STR_SHOW_HIDDEN_FILES, &CrossPointSettings::showHiddenFiles,
                                     "showHiddenFiles", StrId::STR_CAT_SYSTEM));
     v.push_back(SettingInfo::Toggle(StrId::STR_REMOVE_READ_FROM_RECENTS,
