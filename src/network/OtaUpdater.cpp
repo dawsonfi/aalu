@@ -279,8 +279,10 @@ OtaUpdater::OtaUpdaterError OtaUpdater::installUpdate(ProgressCallback onProgres
   }
   totalSize = contentLength;
 
-  // Keep the radio responsive while we stream the binary; restored on every exit path.
+  // Keep the radio out of modem-sleep and at full TX power while we stream the ~5MB binary, so a
+  // weak/mesh link doesn't stall or drop mid-download; power-save is restored on every exit path.
   esp_wifi_set_ps(WIFI_PS_NONE);
+  esp_wifi_set_max_tx_power(84);
 
   NetworkClient* stream = http.getStreamPtr();
   if (stream == nullptr) {
