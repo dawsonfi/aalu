@@ -1,5 +1,6 @@
 #pragma once
 
+#include <HalStorage.h>
 #include <expat.h>
 
 #include <climits>
@@ -96,6 +97,13 @@ class ChapterHtmlSlimParser {
   std::vector<std::pair<int, FootnoteEntry>> pendingFootnotes;  // <wordIndex, entry>
   int wordsExtractedInBlock = 0;
 
+  // Resumable-parse state. The one-shot parseAndBuildPages() drives these internally; the
+  // incremental section builder drives them across render ticks so a large chapter can yield
+  // between buffer chunks instead of blocking the UI until the whole chapter is laid out.
+  XML_Parser xmlParser_ = nullptr;
+  FsFile parseFile_;
+  uint32_t parseStartTime_ = 0;
+
   void updateEffectiveInlineStyle();
   void startNewTextBlock(const BlockStyle& blockStyle);
   void flushPartWordBuffer();
@@ -134,8 +142,25 @@ class ChapterHtmlSlimParser {
         contentBase(contentBase),
         imageBasePath(imageBasePath) {}
 
-  ~ChapterHtmlSlimParser() = default;
+  ~ChapterHtmlSlimParser();
+
+  // One-shot parse: builds every page before returning (beginParse + parseStep* + finishParse).
   bool parseAndBuildPages();
+
+  // Resumable parse for the incremental section builder. Drive as:
+  //   if (!beginParse()) fail;
+  //   loop: switch (parseStep()) { More: keep going / yield; Done: finishParse(); Error: abortParse(); }
+  // Pages are emitted via completePageFn as they complete inside parseStep().
+  enum class ParseStatus { More, Done, Error };
+  bool beginParse();
+  ParseStatus parseStep();
+  bool finishParse();
+  void abortParse();
+
+  // Byte progress of the in-flight parse, for estimating a still-building section's page count.
+  size_t parseBytesConsumed() { return parseFile_ ? parseFile_.position() : 0; }
+  size_t parseTotalBytes() { return parseFile_ ? parseFile_.size() : 0; }
+
   void addLineToPage(std::shared_ptr<TextBlock> line);
   const std::vector<std::pair<std::string, uint16_t>>& getAnchors() const { return anchorData; }
 };
