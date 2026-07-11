@@ -39,6 +39,8 @@ inline uint64_t cachePathHash(const std::string& s) {
 #endif
 }
 
+bool naturalLess(const std::string& str1, const std::string& str2);
+
 void sortFileList(std::vector<std::string>& strs);
 
 /**

@@ -4,6 +4,7 @@
 #include <Epub/Section.h>
 
 #include "CrossPointSettings.h"
+#include "EndOfBookOptions.h"
 #include "EpubReaderMenuActivity.h"
 #include "activities/Activity.h"
 #include "components/themes/BaseTheme.h"
@@ -32,6 +33,8 @@ class EpubReaderActivity final : public Activity {
   bool skipNextButtonCheck = false;  // Skip button processing for one frame after subactivity exit
   uint32_t sessionPagesTurned = 0;   // NEW: tracks pages turned in the current session
   bool automaticPageTurnActive = false;
+
+  EndOfBookOptions endOfBookOptions;
 
   // --- QUICK SETTINGS OVERLAY ---
   enum class QuickSettingsState { CLOSED, TAB_FOCUSED, ITEM_FOCUSED };
