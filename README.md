@@ -70,10 +70,13 @@ Everything below is on top of what Seek Reader / CrossPoint already do.
 - **Bionic Reading mode** — bolds the first few characters of each word to create fixation points that guide the eye through text. Toggle from the Aa overlay; works with any installed font family (Bookerly, Noto Sans, OpenDyslexic). Pure render-time effect — toggling does not invalidate the section cache, so flipping it back and forth is instant.
 - **Offline English dictionary** — pixel-perfect word selection from EPUB text, StarDict format, Levenshtein-based "did you mean?" suggestions, memory-safe lookup history. *(Drop `dictionary.dict` and `dictionary.idx` onto the SD card — sample files in [`English-Dictionary/`](./English-Dictionary).)*
 - **KOReader sync** — heuristic paragraph-level synchronization that fixes chapter drift and avoids crashing remote-device XML parsers.
+- **End-of-Book suggestions** — finishing a book shows the next sibling books in the same folder (natural-sort order) plus a Home entry, so you can jump straight into the next read instead of a plain "End of book" screen. Works in both the EPUB and XTC readers; with no siblings it keeps the original plain end screen.
 
 ### UI
 - **Carrousel home style** — a cover-flow home screen (Settings → Display → Home style → Carrousel): five covers with your last-read book centered, progress painted on the cover, title + time-left below, and a Streak / Today's goal / Pet stats strip. Clock-less devices fall back to lifetime hours + books finished. Landscape shows the covers only. Flat (today's hero + thumbnails) stays the default.
 - **Multiple home themes** — Classic, Lyra, Recent6 Grid (3×2, memory-safe).
+- **Selection popup for multi-option settings** — settings with more than two choices open a centered picker (Settings and Status Bar) instead of cycling one step per press; Up/Down/Left/Right move the highlight, Confirm applies, Back cancels.
+- **Wi-Fi signal strength bars** — the network list and the connected screen show a cellphone-style four-bar signal glyph mapped from RSSI, instead of an ASCII indicator.
 - **Custom boot/sleep screens** — including a cat boot logo because why not.
 - **Configurable button layout** — front button mapping plus page-nav swap.
 - **Short power-button actions** — choose what a quick power tap does (Settings → Controls → Short Power Button Click): ignore, sleep, page turn, **Refresh Screen** (full-refresh to clear e-ink ghosting), or **Cycle Wallpaper** (show the next `/.sleep/` image). A long hold still sleeps.
@@ -86,7 +89,10 @@ Everything below is on top of what Seek Reader / CrossPoint already do.
 ### Stability
 - **Heap-aware activity transitions** — the home screen's 48KB framebuffer cache is dropped before launching any sub-activity, so heap-hungry features (File Transfer's WiFi + WebServer + WebSockets) get the room they need.
 - **Cascading cover fallbacks** — when a cover thumb isn't on disk at the resolution stats wants, we render from the home page's pregenerated thumb so the page never shows a blank cover.
-- **Reliable HTTPS downloads (fonts, OTA).** The TLS record buffers are trimmed (asymmetric 16KB receive / 4KB send) so an HTTPS handshake fits the ~380KB heap even after WiFi fragmentation — fixing font/OTA downloads that used to fail the instant you started them on a memory-tight device.
+- **Single-allocation page arena.** Each rendered line of text packs its words into one contiguous heap block instead of ~250 small allocations per page — sharply cutting the heap fragmentation that starved the e-ink renderer and network stack on this PSRAM-less device.
+- **Faster, reliable downloads (fonts, OPDS).** The download stack moved to `esp_http_client` with a kept-alive TLS connection and HTTPS verified against the bundled Mozilla CA roots — one reused connection instead of a fresh handshake per request. Paired with the page arena above, the fast stack fits the ~380KB heap without OOM.
+- **OTA without a reset.** Firmware update forces full Wi-Fi TX power and disables modem-sleep *before* the connection (not just the download body), so the TLS handshake no longer stalls on a weak/mesh link — you no longer have to reboot the device before an update will start.
+- **Responsive chapter indexing.** Laying out a chapter yields to the scheduler between chunks (so a slow downloaded-font index of a large chapter no longer trips the watchdog / "wakes" the device), and the eager next-chapter pre-index that used to stall mid-read has been removed.
 - **Connect to the nearest mesh node.** WiFi now scans every channel and joins the *strongest* access point instead of the first one it hears, so on multi-node mesh systems (e.g. TP-Link Deco) the reader links to the closest node rather than a distant one — much stronger signal and far more reliable downloads.
 
 ---
@@ -259,6 +265,13 @@ For the gory format details, see [`docs/file-formats.md`](./docs/file-formats.md
 
 AALU is **actively developed** — I'm using it as my daily reader and shaping it as I go. Recent work has landed:
 
+- ✅ Single-allocation TextBlock page arena — one heap block per line instead of ~250 allocations, cutting fragmentation
+- ✅ `esp_http_client` download stack (kept-alive, CA-verified HTTPS) + OTA that no longer needs a device reset first
+- ✅ End-of-Book next-book suggestions (EPUB + XTC readers)
+- ✅ Selection popup for multi-option settings (Settings + Status Bar)
+- ✅ Wi-Fi signal-strength bars (network list + connected screen)
+- ✅ Responsive chapter indexing — yields between chunks, eager next-chapter pre-index removed
+- ✅ Specific on-screen reason when an SD firmware image fails validation
 - ✅ SD-card `update.bin` flashing + Up + Power recovery mode (no cable required; first-install path for locked devices)
 - ✅ Carrousel home style — a cover-flow home with progress-on-cover and a Streak / Goal / Pet stats strip
 - ✅ Reading companion (pet) that evolves cat → tiger → dragon as you read
