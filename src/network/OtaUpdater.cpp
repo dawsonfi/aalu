@@ -8,6 +8,7 @@
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
 #include <HalStorage.h>
+#include <Memory.h>
 #include <NetworkClientSecure.h>
 #include <Update.h>
 
@@ -43,6 +44,10 @@ std::unique_ptr<NetworkClient> makeHttpsClient() {
 }  // namespace
 
 OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
+  esp_wifi_set_ps(WIFI_PS_NONE);
+  esp_wifi_set_max_tx_power(84);
+  ScopedCleanup restoreModemSleep{[] { esp_wifi_set_ps(WIFI_PS_MIN_MODEM); }};
+
   auto client = makeHttpsClient();
   HTTPClient http;
   http.setTimeout(15000);
@@ -242,6 +247,10 @@ OtaUpdater::OtaUpdaterError OtaUpdater::installUpdate(ProgressCallback onProgres
   }
   LOG_INF("OTA", "esp_ota_begin OK (erase complete)");
 
+  esp_wifi_set_ps(WIFI_PS_NONE);
+  esp_wifi_set_max_tx_power(84);
+  ScopedCleanup restoreModemSleep{[] { esp_wifi_set_ps(WIFI_PS_MIN_MODEM); }};
+
   auto client = makeHttpsClient();
   HTTPClient http;
   http.setTimeout(15000);
@@ -279,16 +288,10 @@ OtaUpdater::OtaUpdaterError OtaUpdater::installUpdate(ProgressCallback onProgres
   }
   totalSize = contentLength;
 
-  // Keep the radio out of modem-sleep and at full TX power while we stream the ~5MB binary, so a
-  // weak/mesh link doesn't stall or drop mid-download; power-save is restored on every exit path.
-  esp_wifi_set_ps(WIFI_PS_NONE);
-  esp_wifi_set_max_tx_power(84);
-
   NetworkClient* stream = http.getStreamPtr();
   if (stream == nullptr) {
     LOG_ERR("OTA", "HTTPClient stream is null");
     http.end();
-    esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
     esp_ota_abort(otaHandle);
     return HTTP_ERROR;
   }
@@ -344,7 +347,6 @@ OtaUpdater::OtaUpdaterError OtaUpdater::installUpdate(ProgressCallback onProgres
   }
 
   http.end();
-  esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
 
   if (totalRead != contentLength) {
     LOG_ERR("OTA", "Incomplete download: %u / %u", static_cast<unsigned>(totalRead),
