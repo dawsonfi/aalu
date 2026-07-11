@@ -92,6 +92,8 @@ void StatusBarSettingsActivity::onEnter() {
 void StatusBarSettingsActivity::onExit() { Activity::onExit(); }
 
 void StatusBarSettingsActivity::loop() {
+  if (optionPopup.handleInput(mappedInput, [this] { requestUpdate(); })) return;
+
   if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
     finish();
     return;
@@ -134,14 +136,27 @@ void StatusBarSettingsActivity::handleSelection() {
     SETTINGS.statusBarBookProgressPercentage = (SETTINGS.statusBarBookProgressPercentage + 1) % 2;
   } else if (selectedIndex == 2) {
     // Progress Bar
-    SETTINGS.statusBarProgressBar = (SETTINGS.statusBarProgressBar + 1) % PROGRESS_BAR_ITEMS;
+    optionPopup.show(menuNames[2], progressBarNames, PROGRESS_BAR_ITEMS, SETTINGS.statusBarProgressBar,
+                     [this](int idx) {
+                       SETTINGS.statusBarProgressBar = static_cast<uint8_t>(idx);
+                       SETTINGS.saveToFile();
+                     });
+    return;
   } else if (selectedIndex == 3) {
     // Progress Bar Thickness
-    SETTINGS.statusBarProgressBarThickness =
-        (SETTINGS.statusBarProgressBarThickness + 1) % PROGRESS_BAR_THICKNESS_ITEMS;
+    optionPopup.show(menuNames[3], progressBarThicknessNames, PROGRESS_BAR_THICKNESS_ITEMS,
+                     SETTINGS.statusBarProgressBarThickness, [this](int idx) {
+                       SETTINGS.statusBarProgressBarThickness = static_cast<uint8_t>(idx);
+                       SETTINGS.saveToFile();
+                     });
+    return;
   } else if (selectedIndex == 4) {
     // Chapter Title
-    SETTINGS.statusBarTitle = (SETTINGS.statusBarTitle + 1) % TITLE_ITEMS;
+    optionPopup.show(menuNames[4], titleNames, TITLE_ITEMS, SETTINGS.statusBarTitle, [this](int idx) {
+      SETTINGS.statusBarTitle = static_cast<uint8_t>(idx);
+      SETTINGS.saveToFile();
+    });
+    return;
   } else if (selectedIndex == 5) {
     // Show Battery
     SETTINGS.statusBarBattery = (SETTINGS.statusBarBattery + 1) % 2;
@@ -162,6 +177,8 @@ void StatusBarSettingsActivity::handleSelection() {
 }
 
 void StatusBarSettingsActivity::render(RenderLock&&) {
+  if (optionPopup.processRender(renderer)) return;
+
   renderer.clearScreen();
 
   auto metrics = UITheme::getInstance().getMetrics();

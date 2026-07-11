@@ -1,0 +1,72 @@
+#pragma once
+#include <I18n.h>
+
+#include <functional>
+#include <string>
+#include <vector>
+
+#include <GfxRenderer.h>
+
+#include "MappedInputManager.h"
+#include "components/UITheme.h"
+
+class OptionPopup {
+ public:
+  void show(StrId titleId, const StrId* optionIds, int optionCount, int currentIndex, std::function<void(int)> onSelect) {
+    title = I18N.get(titleId);
+    ownedStrings.resize(optionCount);
+    for (int i = 0; i < optionCount; i++) {
+      ownedStrings[i] = I18N.get(optionIds[i]);
+    }
+    selectedIndex = currentIndex;
+    onSelectCallback = std::move(onSelect);
+    active = true;
+  }
+
+  void show(StrId titleId, const std::vector<std::string>& options, int currentIndex, std::function<void(int)> onSelect) {
+    title = I18N.get(titleId);
+    ownedStrings = options;
+    selectedIndex = currentIndex;
+    onSelectCallback = std::move(onSelect);
+    active = true;
+  }
+
+  bool handleInput(MappedInputManager& input, const std::function<void()>& requestUpdate) {
+    if (!active) return false;
+
+    const int count = static_cast<int>(ownedStrings.size());
+    if (input.wasPressed(MappedInputManager::Button::Up) || input.wasPressed(MappedInputManager::Button::Left)) {
+      selectedIndex = (selectedIndex - 1 + count) % count;
+      requestUpdate();
+    } else if (input.wasPressed(MappedInputManager::Button::Down) ||
+               input.wasPressed(MappedInputManager::Button::Right)) {
+      selectedIndex = (selectedIndex + 1) % count;
+      requestUpdate();
+    } else if (input.wasPressed(MappedInputManager::Button::Confirm)) {
+      active = false;
+      if (onSelectCallback) onSelectCallback(selectedIndex);
+      requestUpdate();
+    } else if (input.wasPressed(MappedInputManager::Button::Back)) {
+      active = false;
+      requestUpdate();
+    }
+    return true;
+  }
+
+  bool processRender(GfxRenderer& renderer) const {
+    if (!active) return false;
+    GUI.drawOptionPopup(renderer, title.c_str(), ownedStrings, selectedIndex);
+    GUI.drawButtonHintsGlyphs(renderer);
+    renderer.displayBuffer();
+    return true;
+  }
+
+  bool isActive() const { return active; }
+
+ private:
+  bool active = false;
+  std::string title;
+  std::vector<std::string> ownedStrings;
+  int selectedIndex = 0;
+  std::function<void(int)> onSelectCallback;
+};

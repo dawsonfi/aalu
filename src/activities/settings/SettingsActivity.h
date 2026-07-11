@@ -7,6 +7,7 @@
 
 #include "CrossPointSettings.h"
 #include "activities/Activity.h"
+#include "components/OptionPopup.h"
 #include "util/ButtonNavigator.h"
 
 enum class SettingType { TOGGLE, ENUM, ACTION, VALUE, STRING };
@@ -150,6 +151,7 @@ struct SettingInfo {
 
 class SettingsActivity final : public Activity {
   ButtonNavigator buttonNavigator;
+  OptionPopup optionPopup;
 
   int selectedCategoryIndex = 0;  // Currently selected category
   int selectedSettingIndex = 0;

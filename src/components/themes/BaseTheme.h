@@ -157,6 +157,8 @@ class BaseTheme {
   virtual void drawTabBar(const GfxRenderer& renderer, Rect rect, const std::vector<TabInfo>& tabs, bool selected,
                           bool solidSelection = false) const;
   virtual Rect drawPopup(const GfxRenderer& renderer, const char* message) const;
+  void drawOptionPopup(const GfxRenderer& renderer, const char* title, const std::vector<std::string>& options,
+                       int selectedIndex) const;
   virtual void fillPopupProgress(const GfxRenderer& renderer, const Rect& layout, const int progress) const;
   virtual void drawStatusBar(GfxRenderer& renderer, const float bookProgress, const int currentPage,
                              const int pageCount, std::string title, const int paddingBottom = 0,

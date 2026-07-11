@@ -597,6 +597,52 @@ Rect BaseTheme::drawPopup(const GfxRenderer& renderer, const char* message) cons
   return Rect{x, y, w, h};
 }
 
+void BaseTheme::drawOptionPopup(const GfxRenderer& renderer, const char* title, const std::vector<std::string>& options,
+                                int selectedIndex) const {
+  const int pageWidth = renderer.getScreenWidth();
+  const int pageHeight = renderer.getScreenHeight();
+  constexpr int innerPadding = 16;
+  constexpr int rowVPadding = 6;
+  constexpr int titleGap = 10;
+  constexpr int sideMargin = 30;
+
+  const int titleLineHeight = renderer.getLineHeight(UI_12_FONT_ID);
+  const int optionLineHeight = renderer.getLineHeight(UI_10_FONT_ID);
+  const int rowHeight = optionLineHeight + rowVPadding * 2;
+  const int optionCount = static_cast<int>(options.size());
+
+  int maxTextWidth = renderer.getTextWidth(UI_12_FONT_ID, title, EpdFontFamily::BOLD);
+  for (const auto& opt : options) {
+    const int w = renderer.getTextWidth(UI_10_FONT_ID, opt.c_str());
+    if (w > maxTextWidth) maxTextWidth = w;
+  }
+
+  int dialogW = maxTextWidth + innerPadding * 2 + 24;
+  const int maxW = pageWidth - sideMargin * 2;
+  if (dialogW > maxW) dialogW = maxW;
+  const int listHeight = rowHeight * optionCount;
+  const int dialogH = titleLineHeight + titleGap + listHeight + innerPadding * 2;
+  const int dialogX = (pageWidth - dialogW) / 2;
+  const int dialogY = (pageHeight - dialogH) / 2;
+
+  renderer.fillRect(dialogX - 2, dialogY - 2, dialogW + 4, dialogH + 4, true);
+  renderer.fillRect(dialogX, dialogY, dialogW, dialogH, false);
+
+  int y = dialogY + innerPadding;
+  renderer.drawCenteredText(UI_12_FONT_ID, y, title, true, EpdFontFamily::BOLD);
+  y += titleLineHeight + titleGap;
+
+  for (int i = 0; i < optionCount; i++) {
+    const bool selected = (i == selectedIndex);
+    if (selected) {
+      renderer.fillRect(dialogX + innerPadding / 2, y - rowVPadding, dialogW - innerPadding, rowHeight, true);
+    }
+    const int textWidth = renderer.getTextWidth(UI_10_FONT_ID, options[i].c_str());
+    renderer.drawText(UI_10_FONT_ID, dialogX + (dialogW - textWidth) / 2, y, options[i].c_str(), !selected);
+    y += rowHeight;
+  }
+}
+
 void BaseTheme::fillPopupProgress(const GfxRenderer& renderer, const Rect& layout, const int progress) const {
   constexpr int barHeight = 4;
   const int barWidth = layout.width - 30;  // twice the margin in drawPopup to match text width

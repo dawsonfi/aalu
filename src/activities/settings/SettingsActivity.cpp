@@ -89,6 +89,8 @@ void SettingsActivity::onExit() {
 }
 
 void SettingsActivity::loop() {
+  if (optionPopup.handleInput(mappedInput, [this] { requestUpdate(); })) return;
+
   if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
     SETTINGS.saveToFile();
     onGoHome();
@@ -168,6 +170,15 @@ void SettingsActivity::confirmCurrentSetting() {
   const auto& setting = (*currentSettings)[selectedSetting];
   if (setting.nameId == StrId::STR_FONT_FAMILY || setting.type == SettingType::ACTION) {
     activateCurrentSetting();
+  } else if (setting.type == SettingType::ENUM && setting.valuePtr != nullptr && setting.enumValues.size() > 2) {
+    const auto valuePtr = setting.valuePtr;
+    optionPopup.show(setting.nameId, setting.enumValues.data(), static_cast<int>(setting.enumValues.size()),
+                     SETTINGS.*valuePtr, [this, valuePtr](int idx) {
+                       SETTINGS.*valuePtr = static_cast<uint8_t>(idx);
+                       SETTINGS.saveToFile();
+                       requestUpdate();
+                     });
+    requestUpdate();
   } else {
     adjustSettingValue(1);
   }
@@ -280,6 +291,8 @@ void SettingsActivity::activateCurrentSetting() {
 }
 
 void SettingsActivity::render(RenderLock&&) {
+  if (optionPopup.processRender(renderer)) return;
+
   renderer.clearScreen();
 
   const auto pageWidth = renderer.getScreenWidth();
