@@ -1,22 +1,19 @@
 #pragma once
+#include <ArduinoJson.h>
 #include <HalStorage.h>
+#include <PersistableStore.h>
 
 #include <cstdint>
 #include <iosfwd>
 
-class CrossPointSettings {
+class CrossPointSettings : public PersistableStore<CrossPointSettings> {
  private:
   // Private constructor for singleton
   CrossPointSettings() = default;
 
-  // Static instance
-  static CrossPointSettings instance;
+  friend class PersistableStore<CrossPointSettings>;
 
  public:
-  // Delete copy constructor and assignment
-  CrossPointSettings(const CrossPointSettings&) = delete;
-  CrossPointSettings& operator=(const CrossPointSettings&) = delete;
-
   enum SLEEP_SCREEN_MODE {
     DARK = 0,
     LIGHT = 1,
@@ -98,7 +95,7 @@ class CrossPointSettings {
   enum SIDE_BUTTON_LAYOUT { PREV_NEXT = 0, NEXT_PREV = 1, SIDE_BUTTON_LAYOUT_COUNT };
 
   // Font family options. OpenDyslexic was removed in 1.2.0 to reclaim ~800KB of flash for
-  // future features. Users on OpenDyslexic auto-migrate to Bookerly via JsonSettingsIO's
+  // future features. Users on OpenDyslexic auto-migrate to Bookerly via fromJson()'s
   // ENUM clamp (value 2 >= enumValues.size() == 2 -> defaults back to BOOKERLY).
   enum FONT_FAMILY { BOOKERLY = 0, NOTOSANS = 1, FONT_FAMILY_COUNT };
   static constexpr uint8_t BUILTIN_FONT_COUNT = FONT_FAMILY_COUNT;
@@ -238,21 +235,16 @@ class CrossPointSettings {
   SdFontIdResolver sdFontIdResolver = nullptr;
   void* sdFontResolverCtx = nullptr;
 
-  ~CrossPointSettings() = default;
-
-  // Get singleton instance
-  static CrossPointSettings& getInstance() { return instance; }
-
   uint16_t getPowerButtonDuration() const {
     return (shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP) ? 10 : 400;
   }
   int getReaderFontId() const;
 
-  // If count_only is true, returns the number of settings items that would be written.
-  uint8_t writeSettings(FsFile& file, bool count_only = false) const;
-
-  bool saveToFile() const;
   bool loadFromFile();
+
+  static const char* getFilePath() { return "/.crosspoint/settings.json"; }
+  void toJson(JsonDocument& doc) const;
+  bool fromJson(JsonVariantConst doc);
 
   static void validateFrontButtonMapping(CrossPointSettings& settings);
 

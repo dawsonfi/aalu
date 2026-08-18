@@ -1,17 +1,15 @@
 #include "CrossPointSettings.h"
 
 #include <HalStorage.h>
-#include <JsonSettingsIO.h>
 #include <Logging.h>
+#include <ObfuscationUtils.h>
 #include <Serialization.h>
 
 #include <cstring>
 #include <string>
 
+#include "SettingsList.h"
 #include "fontIds.h"
-
-// Initialize the static instance
-CrossPointSettings CrossPointSettings::instance;
 
 void readAndValidate(FsFile& file, uint8_t& member, const uint8_t maxValue) {
   uint8_t tempValue;
@@ -24,8 +22,56 @@ void readAndValidate(FsFile& file, uint8_t& member, const uint8_t maxValue) {
 namespace {
 constexpr uint8_t SETTINGS_FILE_VERSION = 1;
 constexpr char SETTINGS_FILE_BIN[] = "/.crosspoint/settings.bin";
-constexpr char SETTINGS_FILE_JSON[] = "/.crosspoint/settings.json";
 constexpr char SETTINGS_FILE_BAK[] = "/.crosspoint/settings.bin.bak";
+
+// Convert legacy status bar mode into the split fields it was replaced by.
+void applyLegacyStatusBarSettings(CrossPointSettings& settings) {
+  switch (static_cast<CrossPointSettings::STATUS_BAR_MODE>(settings.statusBar)) {
+    case CrossPointSettings::NONE:
+      settings.statusBarChapterPageCount = 0;
+      settings.statusBarBookProgressPercentage = 0;
+      settings.statusBarProgressBar = CrossPointSettings::HIDE_PROGRESS;
+      settings.statusBarTitle = CrossPointSettings::HIDE_TITLE;
+      settings.statusBarBattery = 0;
+      break;
+    case CrossPointSettings::NO_PROGRESS:
+      settings.statusBarChapterPageCount = 0;
+      settings.statusBarBookProgressPercentage = 0;
+      settings.statusBarProgressBar = CrossPointSettings::HIDE_PROGRESS;
+      settings.statusBarTitle = CrossPointSettings::CHAPTER_TITLE;
+      settings.statusBarBattery = 1;
+      break;
+    case CrossPointSettings::BOOK_PROGRESS_BAR:
+      settings.statusBarChapterPageCount = 1;
+      settings.statusBarBookProgressPercentage = 0;
+      settings.statusBarProgressBar = CrossPointSettings::BOOK_PROGRESS;
+      settings.statusBarTitle = CrossPointSettings::CHAPTER_TITLE;
+      settings.statusBarBattery = 1;
+      break;
+    case CrossPointSettings::ONLY_BOOK_PROGRESS_BAR:
+      settings.statusBarChapterPageCount = 1;
+      settings.statusBarBookProgressPercentage = 0;
+      settings.statusBarProgressBar = CrossPointSettings::BOOK_PROGRESS;
+      settings.statusBarTitle = CrossPointSettings::HIDE_TITLE;
+      settings.statusBarBattery = 0;
+      break;
+    case CrossPointSettings::CHAPTER_PROGRESS_BAR:
+      settings.statusBarChapterPageCount = 0;
+      settings.statusBarBookProgressPercentage = 1;
+      settings.statusBarProgressBar = CrossPointSettings::CHAPTER_PROGRESS;
+      settings.statusBarTitle = CrossPointSettings::CHAPTER_TITLE;
+      settings.statusBarBattery = 1;
+      break;
+    case CrossPointSettings::FULL:
+    default:
+      settings.statusBarChapterPageCount = 1;
+      settings.statusBarBookProgressPercentage = 1;
+      settings.statusBarProgressBar = CrossPointSettings::HIDE_PROGRESS;
+      settings.statusBarTitle = CrossPointSettings::CHAPTER_TITLE;
+      settings.statusBarBattery = 1;
+      break;
+  }
+}
 
 // Convert legacy front button layout into explicit logical->hardware mapping.
 void applyLegacyFrontButtonLayout(CrossPointSettings& settings) {
@@ -76,30 +122,161 @@ void CrossPointSettings::validateFrontButtonMapping(CrossPointSettings& settings
   }
 }
 
-bool CrossPointSettings::saveToFile() const {
-  Storage.mkdir("/.crosspoint");
-  return JsonSettingsIO::saveSettings(*this, SETTINGS_FILE_JSON);
-}
+void CrossPointSettings::toJson(JsonDocument& doc) const {
+  const CrossPointSettings& s = *this;
 
-bool CrossPointSettings::loadFromFile() {
-  // Try JSON first
-  if (Storage.exists(SETTINGS_FILE_JSON)) {
-    String json = Storage.readFile(SETTINGS_FILE_JSON);
-    if (!json.isEmpty()) {
-      bool resave = false;
-      bool result = JsonSettingsIO::loadSettings(*this, json.c_str(), &resave);
-      if (result && resave) {
-        if (saveToFile()) {
-          LOG_DBG("CPS", "Resaved settings to update format");
-        } else {
-          LOG_ERR("CPS", "Failed to resave settings after format update");
-        }
+  // Mark the font size as migrated to the new schema (X_SMALL added at index 0)
+  doc["fontSizeMigrated"] = true;
+
+  for (const auto& info : getSettingsList()) {
+    if (!info.key) continue;
+    // Dynamic entries (KOReader etc.) are stored in their own files — skip.
+    if (!info.valuePtr && !info.stringOffset) continue;
+
+    if (info.stringOffset) {
+      const char* strPtr = (const char*)&s + info.stringOffset;
+      if (info.obfuscated) {
+        doc[std::string(info.key) + "_obf"] = obfuscation::obfuscateToBase64(strPtr);
+      } else {
+        doc[info.key] = strPtr;
       }
-      return result;
+    } else {
+      doc[info.key] = s.*(info.valuePtr);
     }
   }
 
-  // Fall back to binary migration
+  // Front button remap — managed by RemapFrontButtons sub-activity, not in SettingsList.
+  doc["frontButtonBack"] = s.frontButtonBack;
+  doc["frontButtonConfirm"] = s.frontButtonConfirm;
+  doc["frontButtonLeft"] = s.frontButtonLeft;
+  doc["frontButtonRight"] = s.frontButtonRight;
+
+  // Hidden flag (no user-visible UI). One-time tooltip dismissal for the
+  // bookshelf refresh gesture; persists across cache wipes.
+  doc["bookshelfRefreshHintSeen"] = s.bookshelfRefreshHintSeen;
+
+  doc["sdFontFamilyName"] = s.sdFontFamilyName;
+
+  doc["clockHasBeenSynced"] = s.clockHasBeenSynced;
+
+  doc["aaResetDone"] = true;
+}
+
+bool CrossPointSettings::fromJson(JsonVariantConst doc) {
+  CrossPointSettings& s = *this;
+  bool needsResave = false;
+
+  // If the font size hasn't been migrated to include EXTRA_SMALL (which shifted all
+  // enum values by +1), the generic loop below reads the raw pre-migration value into
+  // s.fontSize; the correction is applied once the loop is done (see below).
+  const bool fontSizeNeedsMigration = doc["fontSizeMigrated"].isNull() && !doc["fontSize"].isNull();
+  const uint8_t legacyFontSize = fontSizeNeedsMigration ? doc["fontSize"] | (uint8_t)0 : 0;
+
+  auto clamp = [](uint8_t val, uint8_t maxVal, uint8_t def) -> uint8_t { return val < maxVal ? val : def; };
+
+  // Legacy migration: if statusBarChapterPageCount is absent this is a pre-refactor settings file.
+  // Populate s with migrated values now so the generic loop below picks them up as defaults and clamps them.
+  if (doc["statusBarChapterPageCount"].isNull()) {
+    applyLegacyStatusBarSettings(s);
+  }
+
+  for (const auto& info : getSettingsList()) {
+    if (!info.key) continue;
+    // Dynamic entries (KOReader etc.) are stored in their own files — skip.
+    if (!info.valuePtr && !info.stringOffset) continue;
+
+    if (info.stringOffset) {
+      const char* strPtr = (const char*)&s + info.stringOffset;
+      const std::string fieldDefault = strPtr;  // current buffer = struct-initializer default
+      std::string val;
+      if (info.obfuscated) {
+        bool ok = false;
+        val = obfuscation::deobfuscateFromBase64(doc[std::string(info.key) + "_obf"] | "", &ok);
+        if (!ok || val.empty()) {
+          val = doc[info.key] | fieldDefault;
+          if (val != fieldDefault) needsResave = true;
+        }
+      } else {
+        val = doc[info.key] | fieldDefault;
+      }
+      char* destPtr = (char*)&s + info.stringOffset;
+      if (info.stringMaxLen == 0) {
+        LOG_ERR("CPS", "Misconfigured SettingInfo: stringMaxLen is 0 for key '%s'", info.key);
+        destPtr[0] = '\0';
+        needsResave = true;
+        continue;
+      }
+      strncpy(destPtr, val.c_str(), info.stringMaxLen - 1);
+      destPtr[info.stringMaxLen - 1] = '\0';
+    } else {
+      const uint8_t fieldDefault = s.*(info.valuePtr);  // struct-initializer default, read before we overwrite it
+      uint8_t v = doc[info.key] | fieldDefault;
+      if (info.type == SettingType::ENUM) {
+        v = clamp(v, (uint8_t)info.enumValues.size(), fieldDefault);
+      } else if (info.type == SettingType::TOGGLE) {
+        v = clamp(v, (uint8_t)2, fieldDefault);
+      } else if (info.type == SettingType::VALUE) {
+        if (v < info.valueRange.min)
+          v = info.valueRange.min;
+        else if (v > info.valueRange.max)
+          v = info.valueRange.max;
+      }
+      s.*(info.valuePtr) = v;
+    }
+  }
+
+  if (fontSizeNeedsMigration) {
+    const uint8_t migrated = legacyFontSize + 1;  // Shift the old value up to match the new enum mapping
+    s.fontSize = clamp(migrated, FONT_SIZE_COUNT, (uint8_t)MEDIUM);
+    needsResave = true;
+    LOG_DBG("CPS", "Migrated fontSize from %d to %d", legacyFontSize, s.fontSize);
+  }
+
+  if (doc["aaResetDone"].isNull()) {
+    s.textAntiAliasing = 0;
+    needsResave = true;
+  }
+
+  // Front button remap — managed by RemapFrontButtons sub-activity, not in SettingsList.
+  using S = CrossPointSettings;
+  s.frontButtonBack =
+      clamp(doc["frontButtonBack"] | (uint8_t)S::FRONT_HW_BACK, S::FRONT_BUTTON_HARDWARE_COUNT, S::FRONT_HW_BACK);
+  s.frontButtonConfirm = clamp(doc["frontButtonConfirm"] | (uint8_t)S::FRONT_HW_CONFIRM, S::FRONT_BUTTON_HARDWARE_COUNT,
+                               S::FRONT_HW_CONFIRM);
+  s.frontButtonLeft =
+      clamp(doc["frontButtonLeft"] | (uint8_t)S::FRONT_HW_LEFT, S::FRONT_BUTTON_HARDWARE_COUNT, S::FRONT_HW_LEFT);
+  s.frontButtonRight =
+      clamp(doc["frontButtonRight"] | (uint8_t)S::FRONT_HW_RIGHT, S::FRONT_BUTTON_HARDWARE_COUNT, S::FRONT_HW_RIGHT);
+  CrossPointSettings::validateFrontButtonMapping(s);
+
+  // Hidden flag: missing on legacy installs means "not yet seen" → default 0.
+  s.bookshelfRefreshHintSeen = clamp(doc["bookshelfRefreshHintSeen"] | (uint8_t)0, (uint8_t)2, (uint8_t)0);
+
+  const char* sdfn = doc["sdFontFamilyName"] | "";
+  strncpy(s.sdFontFamilyName, sdfn, sizeof(s.sdFontFamilyName) - 1);
+  s.sdFontFamilyName[sizeof(s.sdFontFamilyName) - 1] = '\0';
+
+  s.clockHasBeenSynced = clamp(doc["clockHasBeenSynced"] | (uint8_t)0, (uint8_t)2, (uint8_t)0);
+
+  if (needsResave) {
+    LOG_DBG("CPS", "Resaving settings to update format");
+    requestResave();
+  }
+
+  LOG_DBG("CPS", "Settings loaded from file");
+
+  return true;
+}
+
+bool CrossPointSettings::loadFromFile() {
+  // A settings.json that exists but fails to parse is left alone rather than
+  // treated as "absent" — falling through to the binary migration below would
+  // silently overwrite it with a stale pre-JSON snapshot.
+  if (Storage.exists(getFilePath())) {
+    return PersistableStore<CrossPointSettings>::loadFromFile();
+  }
+
+  // Fall back to binary migration (pre-JSON installs).
   if (Storage.exists(SETTINGS_FILE_BIN)) {
     if (loadFromBinaryFile()) {
       if (saveToFile()) {
