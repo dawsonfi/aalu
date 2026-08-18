@@ -5,20 +5,33 @@
 #include <Memory.h>
 #include <Serialization.h>
 
+#include "Epub/VisibleTextOffsetUtils.h"
 #include "Epub/css/CssParser.h"
 #include "Page.h"
 #include "hyphenation/Hyphenator.h"
 #include "parsers/ChapterHtmlSlimParser.h"
 
 namespace {
-constexpr uint8_t SECTION_FILE_VERSION = 21;
+constexpr uint8_t SECTION_FILE_VERSION = 22;
 // Written into the version byte while a build is in progress; finalizeBuild() patches it to
 // SECTION_FILE_VERSION once the section is complete. An abandoned / crash-interrupted .bin keeps
 // version 0, which loadSectionFile rejects, so it is transparently rebuilt on the next open.
 constexpr uint8_t SECTION_FILE_INCOMPLETE_VERSION = 0;
+// Trailing header fields, in file order: pageCount, then these three uint32 offsets.
+// trailingOffsetFieldPosition(index) below is the single place that turns a field's index into a
+// seek position, so adding a 4th field only means bumping TRAILING_OFFSET_COUNT and adding an
+// index constant -- every existing seek stays correct instead of needing its own manual update.
+constexpr int TRAILING_OFFSET_COUNT = 3;
+constexpr int PAGE_LUT_OFFSET_FIELD = 0;
+constexpr int ANCHOR_MAP_OFFSET_FIELD = 1;
+constexpr int VISIBLE_LUT_OFFSET_FIELD = 2;
 constexpr uint32_t HEADER_SIZE = sizeof(uint8_t) + sizeof(int) + sizeof(float) + sizeof(bool) + sizeof(uint8_t) +
                                  sizeof(uint16_t) + sizeof(uint16_t) + sizeof(uint16_t) + sizeof(bool) + sizeof(bool) +
-                                 sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint32_t);
+                                 sizeof(uint8_t) + sizeof(uint32_t) * TRAILING_OFFSET_COUNT;
+
+constexpr uint32_t trailingOffsetFieldPosition(const int fieldIndex) {
+  return HEADER_SIZE - sizeof(uint32_t) * (TRAILING_OFFSET_COUNT - fieldIndex);
+}
 }  // namespace
 
 Section::Section(const std::shared_ptr<Epub>& epub, const int spineIndex, GfxRenderer& renderer)
@@ -59,7 +72,7 @@ void Section::writeSectionFileHeader(const ReaderRenderSpec& spec) {
                                    sizeof(spec.extraParagraphSpacing) + sizeof(spec.paragraphAlignment) +
                                    sizeof(spec.viewportWidth) + sizeof(spec.viewportHeight) + sizeof(pageCount) +
                                    sizeof(spec.hyphenationEnabled) + sizeof(spec.embeddedStyle) +
-                                   sizeof(spec.imageRendering) + sizeof(uint32_t) + sizeof(uint32_t),
+                                   sizeof(spec.imageRendering) + sizeof(uint32_t) * TRAILING_OFFSET_COUNT,
                 "Header size mismatch");
   serialization::writePod(file, SECTION_FILE_INCOMPLETE_VERSION);
   serialization::writePod(file, spec.fontId);
@@ -74,6 +87,7 @@ void Section::writeSectionFileHeader(const ReaderRenderSpec& spec) {
   serialization::writePod(file, pageCount);  // Placeholder for page count (will be initially 0, patched later)
   serialization::writePod(file, static_cast<uint32_t>(0));  // Placeholder for LUT offset (patched later)
   serialization::writePod(file, static_cast<uint32_t>(0));  // Placeholder for anchor map offset (patched later)
+  serialization::writePod(file, static_cast<uint32_t>(0));  // Placeholder for visible-offset LUT offset (patched later)
 }
 
 bool Section::loadSectionFile(const ReaderRenderSpec& spec) {
@@ -220,7 +234,11 @@ bool Section::startBuild(const ReaderRenderSpec& spec, const std::function<void(
   ctx->parser = makeUniqueNoThrow<ChapterHtmlSlimParser>(
       epub, ctxPtr->tmpHtmlPath, renderer, spec.fontId, spec.lineCompression, spec.extraParagraphSpacing,
       spec.paragraphAlignment, spec.viewportWidth, spec.viewportHeight, spec.hyphenationEnabled,
-      [this, ctxPtr](std::unique_ptr<Page> page) { ctxPtr->lut.push_back(this->onPageComplete(std::move(page))); },
+      [this, ctxPtr](std::unique_ptr<Page> page) {
+        const uint32_t visibleOffset = page->visibleTextOffset;
+        ctxPtr->lut.push_back(this->onPageComplete(std::move(page)));
+        ctxPtr->visibleOffsetLut.push_back(visibleOffset);
+      },
       spec.embeddedStyle, contentBase, imageBasePath, spec.imageRendering, popupFn, ctxPtr->cssParser);
   if (!ctx->parser) {
     LOG_ERR("SCT", "Failed to allocate parser");
@@ -309,15 +327,22 @@ bool Section::finalizeBuild() {
     serialization::writePod(file, page);
   }
 
+  // Write the per-page visible-text-offset LUT, parallel to the page LUT above.
+  const uint32_t visibleLutOffset = file.position();
+  for (const uint32_t offset : build_->visibleOffsetLut) {
+    serialization::writePod(file, offset);
+  }
+
   pageCount = static_cast<uint16_t>(build_->lut.size());
 
   // Patch the version byte from the in-progress sentinel to the real version, then the page count
   // and offsets. The version is written last so a crash mid-build leaves an unusable (rebuildable)
   // file rather than a truncated one that reads as valid.
-  file.seek(HEADER_SIZE - sizeof(uint32_t) * 2 - sizeof(pageCount));
+  file.seek(trailingOffsetFieldPosition(PAGE_LUT_OFFSET_FIELD) - sizeof(pageCount));
   serialization::writePod(file, pageCount);
   serialization::writePod(file, lutOffset);
   serialization::writePod(file, anchorMapOffset);
+  serialization::writePod(file, visibleLutOffset);
   file.seek(0);
   serialization::writePod(file, SECTION_FILE_VERSION);
   file.close();
@@ -368,7 +393,7 @@ std::unique_ptr<Page> Section::loadPageAt(const int page) const {
   if (!Storage.openFileForRead("SCT", filePath, f)) {
     return nullptr;
   }
-  f.seek(HEADER_SIZE - sizeof(uint32_t) * 2);
+  f.seek(trailingOffsetFieldPosition(PAGE_LUT_OFFSET_FIELD));
   uint32_t lutOffset;
   serialization::readPod(f, lutOffset);
   f.seek(lutOffset + sizeof(uint32_t) * page);
@@ -433,7 +458,7 @@ std::optional<uint16_t> Section::getPageForAnchor(const std::string& anchor) con
   }
 
   const uint32_t fileSize = f.size();
-  f.seek(HEADER_SIZE - sizeof(uint32_t));
+  f.seek(trailingOffsetFieldPosition(ANCHOR_MAP_OFFSET_FIELD));
   uint32_t anchorMapOffset;
   serialization::readPod(f, anchorMapOffset);
   if (anchorMapOffset == 0 || anchorMapOffset >= fileSize) {
@@ -457,4 +482,69 @@ std::optional<uint16_t> Section::getPageForAnchor(const std::string& anchor) con
 
   f.close();
   return std::nullopt;
+}
+
+std::optional<uint32_t> Section::getVisibleTextOffsetForPage(const uint16_t page) const {
+  if (build_) {
+    if (page >= build_->visibleOffsetLut.size()) {
+      return std::nullopt;
+    }
+    return build_->visibleOffsetLut[page];
+  }
+  if (page >= pageCount) {
+    return std::nullopt;
+  }
+
+  FsFile f;
+  if (!Storage.openFileForRead("SCT", filePath, f)) {
+    return std::nullopt;
+  }
+  f.seek(trailingOffsetFieldPosition(VISIBLE_LUT_OFFSET_FIELD));
+  uint32_t visibleLutOffset;
+  serialization::readPod(f, visibleLutOffset);
+  std::optional<uint32_t> result;
+  if (visibleLutOffset != 0) {
+    f.seek(visibleLutOffset + sizeof(uint32_t) * page);
+    uint32_t offset;
+    serialization::readPod(f, offset);
+    result = offset;
+  }
+  f.close();
+  return result;
+}
+
+std::optional<uint16_t> Section::getPageForVisibleTextOffset(const uint32_t offset,
+                                                             const bool preferFirstAtOffset) const {
+  if (build_) {
+    return VisibleTextOffsetUtils::findPageForOffset(build_->visibleOffsetLut, offset, preferFirstAtOffset);
+  }
+  if (pageCount == 0) {
+    return std::nullopt;
+  }
+
+  FsFile f;
+  if (!Storage.openFileForRead("SCT", filePath, f)) {
+    return std::nullopt;
+  }
+  f.seek(trailingOffsetFieldPosition(VISIBLE_LUT_OFFSET_FIELD));
+  uint32_t visibleLutOffset;
+  serialization::readPod(f, visibleLutOffset);
+  if (visibleLutOffset == 0) {
+    f.close();
+    return std::nullopt;
+  }
+
+  // Stream the on-disk LUT sequentially rather than materializing it, since pageCount is
+  // caller-controlled (untrusted EPUB content) and could otherwise force an unbounded allocation.
+  f.seek(visibleLutOffset);
+  std::optional<uint16_t> best;
+  for (uint16_t page = 0; page < pageCount; page++) {
+    uint32_t pageOffset;
+    serialization::readPod(f, pageOffset);
+    if (pageOffset > offset) break;
+    best = page;
+    if (preferFirstAtOffset && pageOffset == offset) break;
+  }
+  f.close();
+  return best;
 }

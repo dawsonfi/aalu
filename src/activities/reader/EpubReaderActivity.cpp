@@ -147,18 +147,17 @@ void EpubReaderActivity::onEnter() {
 
   FsFile f;
   if (Storage.openFileForRead("ERS", epub->getCachePath() + "/progress.bin", f)) {
-    uint8_t data[6];
-    int dataSize = f.read(data, 6);
-    if (dataSize == 4 || dataSize == 6) {
-      currentSpineIndex = data[0] + (data[1] << 8);
-      nextPageNumber = data[2] + (data[3] << 8);
+    uint8_t data[10];
+    const int dataSize = f.read(data, sizeof(data));
+    f.close();
+    if (const auto progress = EpubReaderUtils::parseProgress(data, dataSize)) {
+      currentSpineIndex = progress->spineIndex;
+      nextPageNumber = progress->pageNumber;
       cachedSpineIndex = currentSpineIndex;
+      cachedChapterTotalPageCount = progress->pageCount;
+      cachedVisibleTextOffset = progress->visibleTextOffset;
       LOG_DBG("ERS", "Loaded cache: %d, %d", currentSpineIndex, nextPageNumber);
     }
-    if (dataSize == 6) {
-      cachedChapterTotalPageCount = data[4] + (data[5] << 8);
-    }
-    f.close();
   }
   // We may want a better condition to detect if we are opening for the first time.
   // This will trigger if the book is re-opened at Chapter 0.
@@ -228,6 +227,8 @@ void EpubReaderActivity::onExit() {
     epub.reset();
   }
 }
+
+void EpubReaderActivity::rememberCurrentContentOffset() { cachedVisibleTextOffset = currentPageVisibleOffset; }
 
 bool EpubReaderActivity::heapAboveFloors(const size_t minFreeHeap, const size_t minMaxAlloc) {
   return ESP.getFreeHeap() >= minFreeHeap && ESP.getMaxAllocHeap() >= minMaxAlloc;
@@ -760,6 +761,7 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
                                  cachedChapterTotalPageCount = section->estimatedTotalPages();
                                  nextPageNumber = section->currentPage;
                                }
+                               rememberCurrentContentOffset();
                                section.reset();
                              });
       break;
@@ -1007,13 +1009,24 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     }
     const ReaderRenderSpec renderSpec = SETTINGS.readerRenderSpec(viewportWidth, viewportHeight);
 
-    if (!section->loadSectionFile(renderSpec)) {
+    const bool cacheHit = section->loadSectionFile(renderSpec);
+    if (!cacheHit) {
       // Percent jumps, anchor jumps (footnotes/ToC) and settings-change repagination all need the
       // whole chapter up front (final page count / anchor map), so they build fully behind the
       // indexing popup. A plain resume lays out just enough to reach the landing page and lets
       // loop() build the rest behind it, so the first page appears without waiting on the chapter.
       const bool needsFullBuild = pendingPercentJump || !pendingAnchor.empty() ||
                                   (cachedChapterTotalPageCount > 0 && currentSpineIndex == cachedSpineIndex);
+      // Whichever offset the reposition logic below will resolve against, if any -- mirrors that
+      // logic's own precedence (minus the cache-hit case, moot here since we're already rebuilding).
+      // Extends the shallow-resume build target below so it doesn't stop short of this offset and
+      // leave getPageForVisibleTextOffset resolving against a truncated LUT, which would otherwise
+      // silently return the last built page instead of the actual target.
+      const std::optional<uint32_t> pendingOffsetTarget =
+          pendingOffsetJump.has_value() ? pendingOffsetJump
+          : (pendingAnchor.empty() && !pendingPercentJump && currentSpineIndex == cachedSpineIndex)
+              ? cachedVisibleTextOffset
+              : std::nullopt;
       bool built;
       if (needsFullBuild) {
         GUI.drawPopup(renderer, tr(STR_INDEXING));
@@ -1032,7 +1045,9 @@ void EpubReaderActivity::render(RenderLock&& lock) {
           pagesUntilFullRefresh = 1;
         }
         built = section->startBuild(renderSpec);
-        while (built && !section->isBuildComplete() && static_cast<int>(section->pageCount) <= target) {
+        while (built && !section->isBuildComplete() &&
+               (static_cast<int>(section->pageCount) <= target ||
+                (pendingOffsetTarget.has_value() && !section->buildReachedVisibleTextOffset(*pendingOffsetTarget)))) {
           built = section->buildSomeMore(BUILD_PAGES_PER_CHUNK);
         }
       }
@@ -1054,12 +1069,41 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     else
       section->currentPage = nextPageNumber;
 
-    if (!pendingAnchor.empty()) {
+    const bool hadPendingAnchor = !pendingAnchor.empty();
+    if (hadPendingAnchor) {
       if (const auto page = section->getPageForAnchor(pendingAnchor)) section->currentPage = *page;
       pendingAnchor.clear();
     }
 
-    if (cachedChapterTotalPageCount > 0) {
+    if (cacheHit) {
+      // Pagination is byte-identical to the cached save (the render spec matched), so the saved
+      // page number is already correct -- no reflow happened, discard any pending reposition.
+      cachedChapterTotalPageCount = 0;
+      cachedVisibleTextOffset = std::nullopt;
+    } else if (pendingOffsetJump.has_value()) {
+      // Explicit jump (bookmark, KOReader sync) takes priority over any stale resume/settings
+      // target -- both are position requests, and this one is the more specific/recent of the two.
+      if (const auto page = section->getPageForVisibleTextOffset(*pendingOffsetJump)) {
+        section->currentPage = *page;
+      }
+      pendingOffsetJump.reset();
+      cachedChapterTotalPageCount = 0;
+      cachedVisibleTextOffset = std::nullopt;
+    } else if (!hadPendingAnchor && !pendingPercentJump && currentSpineIndex == cachedSpineIndex &&
+               cachedVisibleTextOffset.has_value()) {
+      // Plain resume or settings-change reflow on the same chapter: prefer the content-based
+      // offset over the page-fraction ratio below, since it survives a page-boundary shift the
+      // ratio can't. Only fall back to the ratio if the offset can't be resolved at all (e.g. a
+      // legacy section cache without a visible-offset LUT).
+      if (const auto page = section->getPageForVisibleTextOffset(*cachedVisibleTextOffset)) {
+        section->currentPage = *page;
+      } else if (cachedChapterTotalPageCount > 0 && section->pageCount != cachedChapterTotalPageCount) {
+        float progress = static_cast<float>(section->currentPage) / static_cast<float>(cachedChapterTotalPageCount);
+        section->currentPage = static_cast<int>(progress * section->pageCount);
+      }
+      cachedChapterTotalPageCount = 0;
+      cachedVisibleTextOffset = std::nullopt;
+    } else if (cachedChapterTotalPageCount > 0) {
       if (currentSpineIndex == cachedSpineIndex && section->pageCount != cachedChapterTotalPageCount) {
         float progress = static_cast<float>(section->currentPage) / static_cast<float>(cachedChapterTotalPageCount);
         section->currentPage = static_cast<int>(progress * section->pageCount);
@@ -1134,6 +1178,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     }
     pageLoadRetryCount = 0;  // reset once a page loads cleanly
 
+    currentPageVisibleOffset = section->getVisibleTextOffsetForPage(section->currentPage);
     currentPageFootnotes = std::move(p->footnotes);
 
     const auto start = millis();
@@ -1181,7 +1226,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
 }
 
 bool EpubReaderActivity::saveProgress(int spineIndex, int currentPage, int pageCount) {
-  if (!EpubReaderUtils::saveProgress(*epub, spineIndex, currentPage, pageCount)) {
+  if (!EpubReaderUtils::saveProgress(*epub, spineIndex, currentPage, pageCount, currentPageVisibleOffset)) {
     LOG_ERR("ERS", "Could not save progress!");
     return false;
   }
@@ -1670,6 +1715,7 @@ void EpubReaderActivity::closeAndApplyQuickSettings() {
     if (section) {
       cachedChapterTotalPageCount = section->estimatedTotalPages();
     }
+    rememberCurrentContentOffset();
     // Force EPUB engine to recalculate pages with the new global settings
     section.reset();
     pagesUntilFullRefresh = 0;  // Force crisp AA text on next draw

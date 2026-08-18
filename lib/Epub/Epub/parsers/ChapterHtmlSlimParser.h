@@ -79,6 +79,26 @@ class ChapterHtmlSlimParser {
 
   // Anchor-to-page mapping: tracks which page each HTML id attribute lands on
   int completedPageCount = 0;
+
+  // Content-based position tracking: a running count of visible-text Unicode codepoints from the
+  // start of the chapter, stable across reflow (font/size/margin never change the character
+  // stream). syntheticCharacterData suppresses counting for text AALU fabricates itself (the
+  // table-cell "Tab Row N, Cell M:" prefix, the image alt-text fallback) rather than text that
+  // came from the book.
+  uint32_t visibleTextOffset = 0;
+  uint32_t currentPageVisibleOffset = 0;
+  bool currentPageVisibleOffsetSet = false;
+  bool syntheticCharacterData = false;
+  void setCurrentPageVisibleOffset(uint32_t offset);
+  // Per-word offset bookkeeping for the current text block, in lockstep with wordsExtractedInBlock:
+  // blockWordOffsets[i] is the running offset immediately after word i was flushed (i.e. the start
+  // offset of word i+1), and currentTextBlockStartOffset is word 0's start offset. A block often
+  // lays out into several pages in one synchronous flush (layoutAndExtractLines -> addLineToPage),
+  // with no characterData call in between to re-latch a page's start -- so addLineToPage looks up
+  // each new page's precise starting offset here rather than reusing whatever characterData last
+  // saw, which would otherwise stamp every page in that flush with the same stale value.
+  std::vector<uint32_t> blockWordOffsets;
+  uint32_t currentTextBlockStartOffset = 0;
   // --- ADDED: Exact DOM Path Tracking for KOReader Sync ---
   struct TagCount {
     std::string tag;

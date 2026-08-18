@@ -68,6 +68,11 @@ class Page {
   // --- ADDED: Store the exact KOReader DOM path for this specific page ---
   std::string syncXPath;
 
+  // Visible-text offset this page starts at, set by ChapterHtmlSlimParser before the page-complete
+  // callback moves it. Transient build-time-only field -- not serialized, since Section persists
+  // this per-page value in its own visible-offset LUT (see Section::getVisibleTextOffsetForPage).
+  uint32_t visibleTextOffset = 0;
+
   void addFootnote(const char* number, const char* href) {
     if (footnotes.size() >= MAX_FOOTNOTES_PER_PAGE) return;  // Cap per-page footnotes
     FootnoteEntry entry;

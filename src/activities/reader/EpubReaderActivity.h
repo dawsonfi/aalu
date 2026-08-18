@@ -3,6 +3,9 @@
 #include <Epub/FootnoteEntry.h>
 #include <Epub/Section.h>
 
+#include <cstdint>
+#include <optional>
+
 #include "CrossPointSettings.h"
 #include "EndOfBookOptions.h"
 #include "EpubReaderMenuActivity.h"
@@ -22,6 +25,19 @@ class EpubReaderActivity final : public Activity {
   int pagesUntilFullRefresh = 0;
   int cachedSpineIndex = 0;
   int cachedChapterTotalPageCount = 0;
+  // Content-based position, set alongside the page-fraction fields above (see EpubReaderUtils.h
+  // for the on-disk format and Section::getPageForVisibleTextOffset for the lookup). Takes
+  // priority over the page-fraction reposition on a settings-change reflow or resume, since it
+  // survives a page-boundary shift that a plain page-index/ratio can't; falls back to the
+  // page-fraction path when unset (legacy progress.bin) or when the offset can't be resolved.
+  std::optional<uint32_t> cachedVisibleTextOffset;
+  // Visible-text offset of the page currently on screen, refreshed each time a page loads in
+  // render(). Snapshotted into cachedVisibleTextOffset by rememberCurrentContentOffset() right
+  // before a reflow-triggering settings change, and persisted alongside progress.bin so resume
+  // has it even if the settings change happens in a later session.
+  std::optional<uint32_t> currentPageVisibleOffset;
+  // One-shot explicit offset jump (bookmarks, KOReader sync), consumed on the next section load.
+  std::optional<uint32_t> pendingOffsetJump;
   unsigned long lastPageTurnTime = 0UL;
   unsigned long pageTurnDuration = 0UL;
   // Signals that the next render should reposition within the newly loaded section
@@ -147,6 +163,10 @@ class EpubReaderActivity final : public Activity {
   void renderStatusBar() const;
   int readerClockBandHeight() const;
   bool saveProgress(int spineIndex, int currentPage, int pageCount);
+  // Snapshots currentPageVisibleOffset into cachedVisibleTextOffset. Call right before a
+  // reflow-triggering settings change so render() can land back on the same content once the
+  // section rebuilds with different pagination.
+  void rememberCurrentContentOffset();
   // Jump to a percentage of the book (0-100), mapping it to spine and page.
   void jumpToPercent(int percent);
   void onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction action);

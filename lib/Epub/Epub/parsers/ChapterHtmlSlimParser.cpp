@@ -131,6 +131,7 @@ void ChapterHtmlSlimParser::flushPartWordBuffer() {
   // flush the buffer
   partWordBuffer[partWordBufferIndex] = '\0';
   currentTextBlock->addWord(partWordBuffer, fontStyle, false, nextWordContinues);
+  blockWordOffsets.push_back(visibleTextOffset);
   partWordBufferIndex = 0;
   nextWordContinues = false;
 }
@@ -170,6 +171,8 @@ void ChapterHtmlSlimParser::startNewTextBlock(const BlockStyle& blockStyle) {
   }
   currentTextBlock.reset(new ParsedText(extraParagraphSpacing, hyphenationEnabled, blockStyle));
   wordsExtractedInBlock = 0;
+  blockWordOffsets.clear();
+  currentTextBlockStartOffset = visibleTextOffset;
 }
 
 void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char* name, const XML_Char** atts) {
@@ -298,7 +301,9 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
     headerStyle.strikethrough = false;
     self->inlineStyleStack.push_back(headerStyle);
     self->updateEffectiveInlineStyle();
+    self->syntheticCharacterData = true;
     self->characterData(userData, headerText.c_str(), static_cast<int>(headerText.length()));
+    self->syntheticCharacterData = false;
     if (self->partWordBufferIndex > 0) {
       self->flushPartWordBuffer();
     }
@@ -474,14 +479,19 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
                 // Create page for image - only break if image won't fit remaining space
                 if (self->currentPage && !self->currentPage->elements.empty() &&
                     (self->currentPageNextY + displayHeight > self->viewportHeight)) {
+                  self->currentPage->visibleTextOffset = self->currentPageVisibleOffset;
                   self->completePageFn(std::move(self->currentPage));
                   self->completedPageCount++;
+                  self->currentPageVisibleOffsetSet = false;
                   self->currentPage.reset(new Page());
                   if (!self->currentPage) {
                     LOG_ERR("EHP", "Failed to create new page");
                     return;
                   }
                   self->currentPageNextY = 0;
+                  // No text precedes the image on this fresh page (the pending block was already
+                  // flushed above), so the running total is this page's correct start offset.
+                  self->setCurrentPageVisibleOffset(self->visibleTextOffset);
                 } else if (!self->currentPage) {
                   self->currentPage.reset(new Page());
                   if (!self->currentPage) {
@@ -489,6 +499,7 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
                     return;
                   }
                   self->currentPageNextY = 0;
+                  self->setCurrentPageVisibleOffset(self->visibleTextOffset);
                 }
 
                 // Create ImageBlock and add to page
@@ -525,7 +536,9 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
         self->startNewTextBlock(centeredBlockStyle);
         self->italicUntilDepth = std::min(self->italicUntilDepth, self->depth);
         self->depth += 1;
+        self->syntheticCharacterData = true;
         self->characterData(userData, alt.c_str(), alt.length());
+        self->syntheticCharacterData = false;
         // Skip any child content (skip until parent as we pre-advanced depth above)
         self->skipUntilDepth = self->depth - 1;
         return;
@@ -759,6 +772,13 @@ void XMLCALL ChapterHtmlSlimParser::startElement(void* userData, const XML_Char*
   self->depth += 1;
 }
 
+void ChapterHtmlSlimParser::setCurrentPageVisibleOffset(const uint32_t offset) {
+  if (currentPageVisibleOffsetSet) return;
+  // Page 0 always starts at 0, regardless of any (already-skipped) preceding non-visible content.
+  currentPageVisibleOffset = completedPageCount == 0 ? 0 : offset;
+  currentPageVisibleOffsetSet = true;
+}
+
 void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char* s, const int len) {
   auto* self = static_cast<ChapterHtmlSlimParser*>(userData);
 
@@ -786,6 +806,14 @@ void XMLCALL ChapterHtmlSlimParser::characterData(void* userData, const XML_Char
   }
 
   for (int i = 0; i < len; i++) {
+    // Count one visible-text codepoint per non-continuation byte visited here, in lockstep with
+    // the tokenization below rather than in a separate pass over the whole chunk -- this is what
+    // lets flushPartWordBuffer() record each word's own offset (see blockWordOffsets) instead of
+    // only a single value for however many words this whole characterData call contains.
+    if (!self->syntheticCharacterData && (static_cast<uint8_t>(s[i]) & 0xC0) != 0x80) {
+      self->visibleTextOffset++;
+    }
+
     if (isWhitespace(s[i])) {
       // Currently looking at whitespace, if there's anything in the partWordBuffer, flush it
       if (self->partWordBufferIndex > 0) {
@@ -1161,6 +1189,7 @@ bool ChapterHtmlSlimParser::finishParse() {
       anchorData.push_back({std::move(pendingAnchorId), static_cast<uint16_t>(completedPageCount)});
       pendingAnchorId.clear();
     }
+    currentPage->visibleTextOffset = currentPageVisibleOffset;
     completePageFn(std::move(currentPage));
     completedPageCount++;
     currentPage.reset();
@@ -1196,11 +1225,21 @@ void ChapterHtmlSlimParser::addLineToPage(std::shared_ptr<TextBlock> line) {
   }
 
   if (currentPageNextY + lineHeight > viewportHeight) {
+    currentPage->visibleTextOffset = currentPageVisibleOffset;
     completePageFn(std::move(currentPage));
     completedPageCount++;
+    currentPageVisibleOffsetSet = false;
     currentPage.reset(new Page());
     currentPageNextY = 0;
   }
+
+  // Latch this page's start offset from this line's first word, computed per-word rather than
+  // reused from the last characterData call -- a single already-buffered block can lay out into
+  // several pages in one synchronous flush with no characterData call in between, which would
+  // otherwise stamp every page in that flush with the same stale offset.
+  const uint32_t lineStartOffset =
+      wordsExtractedInBlock == 0 ? currentTextBlockStartOffset : blockWordOffsets[wordsExtractedInBlock - 1];
+  setCurrentPageVisibleOffset(lineStartOffset);
 
   // Track cumulative words to assign footnotes to the page containing their anchor
   wordsExtractedInBlock += line->wordCount();
