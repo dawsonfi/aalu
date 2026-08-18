@@ -40,6 +40,7 @@ fi
 # Additionally exclude files in 'lib/EpdFont/builtinFonts/' as they are script-generated.
 # Also exclude files in 'lib/Epub/Epub/hyphenation/generated/' as they are script-generated.
 # Also exclude 'src/activities/stats/CatSprites.h' as it is script-generated (scripts/bake_cat_sprites.py).
+# Also exclude 'lib/miniz/third_party/' as it is vendored third-party source.
 # Keep the no-match case non-fatal: grep returns 1 when no files match,
 # which is expected when there are no modified C/C++ files.
 set +o pipefail
@@ -49,6 +50,7 @@ git ls-files  --exclude-standard ${GIT_LS_FILES_FLAGS} \
     | grep -v -E '^lib/Epub/Epub/hyphenation/generated/' \
     | grep -v -E '^lib/uzlib/' \
     | grep -v -E '^src/activities/stats/CatSprites\.h$' \
+    | grep -v -E '^lib/miniz/third_party/' \
     | xargs -r "${CLANG_FORMAT_BIN}" -style=file -i
 # Restore strict pipeline failure handling for the rest of the script.
 set -o pipefail
