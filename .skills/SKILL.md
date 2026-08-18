@@ -297,8 +297,9 @@ pio check --fail-on-defect medium --fail-on-defect high
 pio run
 
 # 4. Host tests (compile + run on macOS/Linux, no device)
-bash test/run_differential_rounding_test.sh
-bash test/run_hyphenation_eval.sh
+cmake -S test -B build/test
+cmake --build build/test
+ctest --test-dir build/test --output-on-failure -j
 ```
 
 Rules: all four green or it's not done. Fix warnings, don't paper over. `pio check` `[low:*]` hints are advisory; `medium`/`high` fail. If `clang-format-fix` rewrites files, include them in the commit. Most UI work isn't covered by host tests — say so explicitly when reporting status.

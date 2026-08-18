@@ -14,8 +14,9 @@ struct tinfl_decompressor_tag;
 // Huffman tree bit-by-bit -- several times faster on this CPU -- at the cost
 // of a larger decompressor state (~11KB, transient for the scope of the
 // stream; taken from the lent framebuffer bytes via buildscratch::claim()
-// when a FrameBufferLoan is active, heap otherwise). FontDecompressor
-// intentionally stays on InflateReader:
+// when a FrameBufferLoan is active, heap otherwise -- AALU's GfxRenderer does
+// not yet call buildscratch::lend(), so every inflate is heap-backed today).
+// FontDecompressor intentionally stays on InflateReader:
 // its one-shot flash-resident group decompressions are tiny, and the render
 // path should not carry the extra state allocation.
 //
@@ -53,7 +54,6 @@ class InflateStream {
   // on OOM.
   bool init(bool streaming);
 
-  // Free the decompressor state and window.
   void deinit();
 
   // Provide the entire compressed input as one contiguous buffer.

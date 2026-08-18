@@ -4,9 +4,11 @@
 #include <cstdint>
 
 // Registry for the framebuffer bytes lent out during a build phase
-// (GfxRenderer::FrameBufferLoan). The lender (GfxRenderer) deposits the block
-// with lend()/reclaim(); a memory-hungry consumer (e.g. InflateStream's ~43KB
-// tinfl state + window) may claim() it instead of allocating from the heap.
+// (upstream: GfxRenderer::FrameBufferLoan -- not yet ported to AALU, so
+// lend() has no caller today and claim() always returns nullptr). The lender
+// deposits the block with lend()/reclaim(); a memory-hungry consumer (e.g.
+// InflateStream's ~43KB tinfl state + window) may claim() it instead of
+// allocating from the heap.
 //
 // Exactly one claimant at a time; claim() returns nullptr when the block is
 // absent or already claimed, and consumers must fall back to the heap. The
@@ -15,7 +17,6 @@
 // logs an error) reads garbage, never freed memory.
 namespace buildscratch {
 
-// Lender side (GfxRenderer only).
 void lend(uint8_t* buf, size_t len);
 void reclaim();
 

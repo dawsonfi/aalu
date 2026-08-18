@@ -1,6 +1,7 @@
 #include "InflateStream.h"
 
 #include <BuildScratch.h>
+#include <Logging.h>
 
 #include <cstdlib>
 #include <cstring>
@@ -23,7 +24,8 @@ bool InflateStream::init(const bool streaming) {
 
   // During a framebuffer loan the lent 48KB is up for grabs: state (~11KB) +
   // window (32KB) fit inside it, so a chapter-build inflate costs the heap
-  // nothing. Absent (or already claimed): plain heap, freed in deinit().
+  // nothing. Absent (or already claimed) -- which is always, until AALU's
+  // GfxRenderer calls buildscratch::lend() -- plain heap, freed in deinit().
   const size_t needed = STATE_ALIGNED + (streaming ? WINDOW_SIZE : 0);
   arenaBase = buildscratch::claim(needed);
   if (arenaBase) {
@@ -34,10 +36,17 @@ bool InflateStream::init(const bool streaming) {
     // an incomplete type so consumers never include miniz; both blocks are
     // freed in deinit()/the destructor.
     state = static_cast<tinfl_decompressor*>(malloc(sizeof(tinfl_decompressor)));
-    if (!state) return false;
+    if (!state) {
+      LOG_ERR("INFL", "malloc failed: %d", static_cast<int>(sizeof(tinfl_decompressor)));
+      return false;
+    }
     if (streaming) {
       window = static_cast<uint8_t*>(malloc(WINDOW_SIZE));
-      if (!window) return false;  // state kept; deinit()/next init reclaims it
+      if (!window) {
+        // state kept; deinit()/next init reclaims it
+        LOG_ERR("INFL", "malloc failed: %d", static_cast<int>(WINDOW_SIZE));
+        return false;
+      }
     }
   }
 
@@ -81,7 +90,10 @@ void InflateStream::setFill(const FillFn fn, void* ctx) {
 
 InflateStream::Status InflateStream::readAtMost(uint8_t* dest, const size_t maxLen, size_t* produced) {
   *produced = 0;
-  if (!state) return Status::Error;
+  if (!state) {
+    LOG_ERR("INFL", "readAtMost called before a successful init()");
+    return Status::Error;
+  }
 
   const bool streaming = window != nullptr;
   if (!streaming && !oneShotStart) oneShotStart = dest;
@@ -138,11 +150,16 @@ InflateStream::Status InflateStream::readAtMost(uint8_t* dest, const size_t maxL
       finished = true;  // drain any pending window bytes on the next pass
       continue;
     }
-    if (status < TINFL_STATUS_DONE) return Status::Error;  // corrupt stream / adler mismatch
+    if (status < TINFL_STATUS_DONE) {
+      LOG_ERR("INFL", "tinfl_decompress failed: status=%d (corrupt stream or adler mismatch)",
+              static_cast<int>(status));
+      return Status::Error;
+    }
     // TINFL_STATUS_NEEDS_MORE_INPUT loops back to the fill above; once the fill
     // runs dry the HAS_MORE_INPUT flag drops and tinfl either finishes or fails
     // (truncated stream) instead of spinning.
     if (status == TINFL_STATUS_NEEDS_MORE_INPUT && inputExhausted && inAvail == 0) {
+      LOG_ERR("INFL", "input exhausted before stream completed (truncated?)");
       return Status::Error;
     }
     if (*produced == maxLen) {
