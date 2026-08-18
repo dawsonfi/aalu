@@ -110,11 +110,43 @@ class EpubReaderActivity final : public Activity {
   // multi-second wait even though its page count is small. Ordinary chapters stay under this.
   static constexpr size_t BUILD_POPUP_BYTE_THRESHOLD = 96 * 1024;
 
+  // Skip a background build tick below these floors. The parse path grows word vectors of heap
+  // strings -- an allocation that aborts() on OOM under -fno-exceptions. The tick is deferrable
+  // work: page-turn transients free up between turns and the gate is re-checked every tick. Free
+  // heap alone isn't enough -- fragmentation can leave plenty of free bytes with no single block
+  // big enough for a parse allocation -- so both floors must pass.
+  static constexpr size_t BACKGROUND_BUILD_MIN_FREE_HEAP = 32 * 1024;
+  static constexpr size_t BACKGROUND_BUILD_MIN_MAX_ALLOC = 16 * 1024;
+  // True while a background build tick is gated on the heap floors above. Lets skipLoopDelay()
+  // fall back to the normal delay/power-saving loop cadence during the pause instead of pinning
+  // the CPU at full speed while no build work is actually happening.
+  bool buildHeapPaused = false;
+  // Gate for a background build tick: true when the heap can safely take parse allocations.
+  // Updates buildHeapPaused as a side effect.
+  bool buildTickHeapGate();
+  // Shared by buildTickHeapGate() and the idle-prewarm check below: true when both a free-heap
+  // and a largest-allocatable-block floor are satisfied. Free heap alone isn't enough --
+  // fragmentation can leave plenty of free bytes with no single block big enough for the
+  // allocation that actually needs to happen.
+  static bool heapAboveFloors(size_t minFreeHeap, size_t minMaxAlloc);
+
+  // Idle glyph prewarm: after a page settles, load the likely-next page's missing glyphs from SD
+  // during idle so the next turn's in-render prewarm is a cache hit instead of paying SD-read cost
+  // on the page-turn critical path. Debounced, one attempt per (spine, page) position, and gated
+  // on a lower free-heap floor than the background build: a render-time prewarm is a single-page
+  // scan (lighter than the parse path's word-vector growth during a chapter build), and this exact
+  // pair of floors mirrors upstream CrossPoint's own calibration for the two cases.
+  static constexpr size_t RENDER_MIN_FREE_HEAP = 24 * 1024;
+  static constexpr unsigned long IDLE_PREWARM_DEBOUNCE_MS = 400;
+  int idlePrewarmSpine = -1;
+  int idlePrewarmPage = -1;
+  unsigned long lastRenderCompleteMs = 0;
+
   void renderContents(std::unique_ptr<Page> page, int orientedMarginTop, int orientedMarginRight,
                       int orientedMarginBottom, int orientedMarginLeft);
   void renderStatusBar() const;
   int readerClockBandHeight() const;
-  void saveProgress(int spineIndex, int currentPage, int pageCount);
+  bool saveProgress(int spineIndex, int currentPage, int pageCount);
   // Jump to a percentage of the book (0-100), mapping it to spine and page.
   void jumpToPercent(int percent);
   void onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction action);
@@ -135,4 +167,5 @@ class EpubReaderActivity final : public Activity {
   void loop() override;
   void render(RenderLock&& lock) override;
   bool isReaderActivity() const override { return true; }
+  bool skipLoopDelay() override { return section && section->isBuilding() && !buildHeapPaused; }
 };

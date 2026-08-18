@@ -506,3 +506,18 @@ int CrossPointSettings::getReaderFontId() const {
       }
   }
 }
+
+ReaderRenderSpec CrossPointSettings::readerRenderSpec(const uint16_t viewportWidth,
+                                                      const uint16_t viewportHeight) const {
+  ReaderRenderSpec spec;
+  spec.fontId = getReaderFontId();
+  spec.lineCompression = getReaderLineCompression();
+  spec.extraParagraphSpacing = extraParagraphSpacing != 0;
+  spec.paragraphAlignment = paragraphAlignment;
+  spec.viewportWidth = viewportWidth;
+  spec.viewportHeight = viewportHeight;
+  spec.hyphenationEnabled = hyphenationEnabled != 0;
+  spec.embeddedStyle = embeddedStyle != 0;
+  spec.imageRendering = imageRendering;
+  return spec;
+}

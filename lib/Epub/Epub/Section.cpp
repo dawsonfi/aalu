@@ -50,38 +50,33 @@ uint32_t Section::onPageComplete(std::unique_ptr<Page> page) {
   return position;
 }
 
-void Section::writeSectionFileHeader(const int fontId, const float lineCompression, const bool extraParagraphSpacing,
-                                     const uint8_t paragraphAlignment, const uint16_t viewportWidth,
-                                     const uint16_t viewportHeight, const bool hyphenationEnabled,
-                                     const bool embeddedStyle, const uint8_t imageRendering) {
+void Section::writeSectionFileHeader(const ReaderRenderSpec& spec) {
   if (!file) {
     LOG_DBG("SCT", "File not open for writing header");
     return;
   }
-  static_assert(HEADER_SIZE == sizeof(SECTION_FILE_VERSION) + sizeof(fontId) + sizeof(lineCompression) +
-                                   sizeof(extraParagraphSpacing) + sizeof(paragraphAlignment) + sizeof(viewportWidth) +
-                                   sizeof(viewportHeight) + sizeof(pageCount) + sizeof(hyphenationEnabled) +
-                                   sizeof(embeddedStyle) + sizeof(imageRendering) + sizeof(uint32_t) + sizeof(uint32_t),
+  static_assert(HEADER_SIZE == sizeof(SECTION_FILE_VERSION) + sizeof(spec.fontId) + sizeof(spec.lineCompression) +
+                                   sizeof(spec.extraParagraphSpacing) + sizeof(spec.paragraphAlignment) +
+                                   sizeof(spec.viewportWidth) + sizeof(spec.viewportHeight) + sizeof(pageCount) +
+                                   sizeof(spec.hyphenationEnabled) + sizeof(spec.embeddedStyle) +
+                                   sizeof(spec.imageRendering) + sizeof(uint32_t) + sizeof(uint32_t),
                 "Header size mismatch");
   serialization::writePod(file, SECTION_FILE_INCOMPLETE_VERSION);
-  serialization::writePod(file, fontId);
-  serialization::writePod(file, lineCompression);
-  serialization::writePod(file, extraParagraphSpacing);
-  serialization::writePod(file, paragraphAlignment);
-  serialization::writePod(file, viewportWidth);
-  serialization::writePod(file, viewportHeight);
-  serialization::writePod(file, hyphenationEnabled);
-  serialization::writePod(file, embeddedStyle);
-  serialization::writePod(file, imageRendering);
+  serialization::writePod(file, spec.fontId);
+  serialization::writePod(file, spec.lineCompression);
+  serialization::writePod(file, spec.extraParagraphSpacing);
+  serialization::writePod(file, spec.paragraphAlignment);
+  serialization::writePod(file, spec.viewportWidth);
+  serialization::writePod(file, spec.viewportHeight);
+  serialization::writePod(file, spec.hyphenationEnabled);
+  serialization::writePod(file, spec.embeddedStyle);
+  serialization::writePod(file, spec.imageRendering);
   serialization::writePod(file, pageCount);  // Placeholder for page count (will be initially 0, patched later)
   serialization::writePod(file, static_cast<uint32_t>(0));  // Placeholder for LUT offset (patched later)
   serialization::writePod(file, static_cast<uint32_t>(0));  // Placeholder for anchor map offset (patched later)
 }
 
-bool Section::loadSectionFile(const int fontId, const float lineCompression, const bool extraParagraphSpacing,
-                              const uint8_t paragraphAlignment, const uint16_t viewportWidth,
-                              const uint16_t viewportHeight, const bool hyphenationEnabled, const bool embeddedStyle,
-                              const uint8_t imageRendering) {
+bool Section::loadSectionFile(const ReaderRenderSpec& spec) {
   if (!Storage.openFileForRead("SCT", filePath, file)) {
     return false;
   }
@@ -115,11 +110,11 @@ bool Section::loadSectionFile(const int fontId, const float lineCompression, con
     serialization::readPod(file, fileEmbeddedStyle);
     serialization::readPod(file, fileImageRendering);
 
-    if (fontId != fileFontId || lineCompression != fileLineCompression ||
-        extraParagraphSpacing != fileExtraParagraphSpacing || paragraphAlignment != fileParagraphAlignment ||
-        viewportWidth != fileViewportWidth || viewportHeight != fileViewportHeight ||
-        hyphenationEnabled != fileHyphenationEnabled || embeddedStyle != fileEmbeddedStyle ||
-        imageRendering != fileImageRendering) {
+    if (spec.fontId != fileFontId || spec.lineCompression != fileLineCompression ||
+        spec.extraParagraphSpacing != fileExtraParagraphSpacing || spec.paragraphAlignment != fileParagraphAlignment ||
+        spec.viewportWidth != fileViewportWidth || spec.viewportHeight != fileViewportHeight ||
+        spec.hyphenationEnabled != fileHyphenationEnabled || spec.embeddedStyle != fileEmbeddedStyle ||
+        spec.imageRendering != fileImageRendering) {
       file.close();
       LOG_ERR("SCT", "Deserialization failed: Parameters do not match");
       clearCache();
@@ -149,10 +144,7 @@ bool Section::clearCache() const {
   return true;
 }
 
-bool Section::startBuild(const int fontId, const float lineCompression, const bool extraParagraphSpacing,
-                         const uint8_t paragraphAlignment, const uint16_t viewportWidth, const uint16_t viewportHeight,
-                         const bool hyphenationEnabled, const bool embeddedStyle, const uint8_t imageRendering,
-                         const std::function<void()>& popupFn) {
+bool Section::startBuild(const ReaderRenderSpec& spec, const std::function<void()>& popupFn) {
   if (build_) {
     LOG_ERR("SCT", "Build already in progress");
     return false;
@@ -201,8 +193,7 @@ bool Section::startBuild(const int fontId, const float lineCompression, const bo
     Storage.remove(tmpHtmlPath.c_str());
     return false;
   }
-  writeSectionFileHeader(fontId, lineCompression, extraParagraphSpacing, paragraphAlignment, viewportWidth,
-                         viewportHeight, hyphenationEnabled, embeddedStyle, imageRendering);
+  writeSectionFileHeader(spec);
 
   auto ctx = makeUniqueNoThrow<BuildContext>();
   if (!ctx) {
@@ -218,7 +209,7 @@ bool Section::startBuild(const int fontId, const float lineCompression, const bo
   const std::string contentBase = (lastSlash != std::string::npos) ? localPath.substr(0, lastSlash + 1) : "";
   const std::string imageBasePath = epub->getCachePath() + "/img_" + std::to_string(spineIndex) + "_";
 
-  if (embeddedStyle) {
+  if (spec.embeddedStyle) {
     ctx->cssParser = epub->getCssParser();
     if (ctx->cssParser && !ctx->cssParser->loadFromCache()) {
       LOG_ERR("SCT", "Failed to load CSS from cache");
@@ -227,10 +218,10 @@ bool Section::startBuild(const int fontId, const float lineCompression, const bo
 
   BuildContext* const ctxPtr = ctx.get();
   ctx->parser = makeUniqueNoThrow<ChapterHtmlSlimParser>(
-      epub, ctxPtr->tmpHtmlPath, renderer, fontId, lineCompression, extraParagraphSpacing, paragraphAlignment,
-      viewportWidth, viewportHeight, hyphenationEnabled,
+      epub, ctxPtr->tmpHtmlPath, renderer, spec.fontId, spec.lineCompression, spec.extraParagraphSpacing,
+      spec.paragraphAlignment, spec.viewportWidth, spec.viewportHeight, spec.hyphenationEnabled,
       [this, ctxPtr](std::unique_ptr<Page> page) { ctxPtr->lut.push_back(this->onPageComplete(std::move(page))); },
-      embeddedStyle, contentBase, imageBasePath, imageRendering, popupFn, ctxPtr->cssParser);
+      spec.embeddedStyle, contentBase, imageBasePath, spec.imageRendering, popupFn, ctxPtr->cssParser);
   if (!ctx->parser) {
     LOG_ERR("SCT", "Failed to allocate parser");
     if (ctx->cssParser) {
@@ -362,12 +353,8 @@ void Section::abandonBuild() {
   pageCount = 0;
 }
 
-bool Section::createSectionFile(const int fontId, const float lineCompression, const bool extraParagraphSpacing,
-                                const uint8_t paragraphAlignment, const uint16_t viewportWidth,
-                                const uint16_t viewportHeight, const bool hyphenationEnabled, const bool embeddedStyle,
-                                const uint8_t imageRendering, const std::function<void()>& popupFn) {
-  if (!startBuild(fontId, lineCompression, extraParagraphSpacing, paragraphAlignment, viewportWidth, viewportHeight,
-                  hyphenationEnabled, embeddedStyle, imageRendering, popupFn)) {
+bool Section::createSectionFile(const ReaderRenderSpec& spec, const std::function<void()>& popupFn) {
+  if (!startBuild(spec, popupFn)) {
     return false;
   }
   if (!buildSomeMore(0)) {

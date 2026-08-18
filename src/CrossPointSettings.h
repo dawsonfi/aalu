@@ -1,5 +1,6 @@
 #pragma once
 #include <ArduinoJson.h>
+#include <Epub/ReaderRenderSpec.h>
 #include <HalStorage.h>
 #include <PersistableStore.h>
 
@@ -239,6 +240,7 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     return (shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP) ? 10 : 400;
   }
   int getReaderFontId() const;
+  ReaderRenderSpec readerRenderSpec(uint16_t viewportWidth, uint16_t viewportHeight) const;
 
   bool loadFromFile();
 

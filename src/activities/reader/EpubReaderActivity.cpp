@@ -10,6 +10,7 @@
 #include <HalStorage.h>
 #include <I18n.h>
 #include <Logging.h>
+#include <Memory.h>
 #include <esp_system.h>
 
 #include <algorithm>
@@ -21,11 +22,11 @@
 #include "EpubReaderChapterSelectionActivity.h"
 #include "EpubReaderFootnotesActivity.h"
 #include "EpubReaderPercentSelectionActivity.h"
+#include "EpubReaderUtils.h"
 #include "JsonSettingsIO.h"
 #include "KOReaderCredentialStore.h"
 #include "KOReaderSyncActivity.h"
 #include "MappedInputManager.h"
-#include "ProgressFile.h"
 #include "QrDisplayActivity.h"
 #include "ReaderUtils.h"
 #include "RecentBooksStore.h"
@@ -228,6 +229,15 @@ void EpubReaderActivity::onExit() {
   }
 }
 
+bool EpubReaderActivity::heapAboveFloors(const size_t minFreeHeap, const size_t minMaxAlloc) {
+  return ESP.getFreeHeap() >= minFreeHeap && ESP.getMaxAllocHeap() >= minMaxAlloc;
+}
+
+bool EpubReaderActivity::buildTickHeapGate() {
+  buildHeapPaused = !heapAboveFloors(BACKGROUND_BUILD_MIN_FREE_HEAP, BACKGROUND_BUILD_MIN_MAX_ALLOC);
+  return !buildHeapPaused;
+}
+
 void EpubReaderActivity::loop() {
   if (!epub) {
     // Should never happen
@@ -239,11 +249,47 @@ void EpubReaderActivity::loop() {
   // out in the background while the reader shows the pages already built. Under the render lock so
   // it never races render()/pageTurn() mutating the section; skipped when the lock is already held,
   // and re-checked under the lock since another path may have finished the build in between.
-  if (section && section->isBuilding() && !RenderLock::peek()) {
+  if (section && section->isBuilding() && !RenderLock::peek() && buildTickHeapGate()) {
     RenderLock lock(*this);
-    if (section && section->isBuilding() && !section->buildSomeMore(BACKGROUND_BUILD_PAGES_PER_TICK)) {
+    // Re-check under the lock: render() (also RenderLock-guarded) may have finalized the build
+    // between the outer check and acquiring the lock, and it may have grown retained glyph
+    // buffers in the process, invalidating the pre-lock heap reading.
+    if (section && section->isBuilding() && buildTickHeapGate() &&
+        !section->buildSomeMore(BACKGROUND_BUILD_PAGES_PER_TICK)) {
       section.reset();
       requestUpdate();
+    }
+  }
+
+  // Idle glyph prewarm for the likely next page (currentPage + 1). The scan pass draws nothing
+  // (FontCacheManager scan mode suppresses pixels), so the displayed framebuffer is untouched;
+  // endScanAndPrewarm loads only glyphs not already cached. Debounced past rapid page-flipping,
+  // one attempt per position, and deferred while a render/build owns the CPU or the heap is at the
+  // render floor. Cross-chapter prewarm is deliberately out of scope (next spine's section isn't
+  // loaded).
+  if (section && !section->isBuilding() && !RenderLock::peek() && renderer.getFrameBuffer() != nullptr &&
+      lastRenderCompleteMs != 0 && millis() - lastRenderCompleteMs > IDLE_PREWARM_DEBOUNCE_MS &&
+      heapAboveFloors(RENDER_MIN_FREE_HEAP, BACKGROUND_BUILD_MIN_MAX_ALLOC) &&
+      (idlePrewarmSpine != currentSpineIndex || idlePrewarmPage != section->currentPage)) {
+    RenderLock lock(*this);  // the page table must not change under the scan
+    // Re-check under the lock: peek() and acquisition are not atomic, so the render path may have
+    // reset/replaced the section or moved the page in between.
+    if (section && !section->isBuilding() &&
+        (idlePrewarmSpine != currentSpineIndex || idlePrewarmPage != section->currentPage)) {
+      idlePrewarmSpine = currentSpineIndex;
+      idlePrewarmPage = section->currentPage;
+      const int nextPage = section->currentPage + 1;
+      if (nextPage < static_cast<int>(section->pageCount)) {
+        if (const auto p = section->loadPage(nextPage)) {
+          if (auto* fcm = renderer.getFontCacheManager()) {
+            const auto t0 = millis();
+            auto scope = fcm->createPrewarmScope();
+            p->render(renderer, SETTINGS.getReaderFontId(), 0, 0);  // scan only, no pixels
+            scope.endScanAndPrewarm();
+            LOG_DBG("ERS", "Idle prewarm: page %d in %lums", nextPage, millis() - t0);
+          }
+        }
+      }
     }
   }
 
@@ -954,12 +1000,14 @@ void EpubReaderActivity::render(RenderLock&& lock) {
 
   if (!section) {
     const auto filepath = epub->getSpineItem(currentSpineIndex).href;
-    section = std::unique_ptr<Section>(new Section(epub, currentSpineIndex, renderer));
+    section = makeUniqueNoThrow<Section>(epub, currentSpineIndex, renderer);
+    if (!section) {
+      LOG_ERR("ERS", "OOM allocating Section");
+      return;
+    }
+    const ReaderRenderSpec renderSpec = SETTINGS.readerRenderSpec(viewportWidth, viewportHeight);
 
-    if (!section->loadSectionFile(SETTINGS.getReaderFontId(), SETTINGS.getReaderLineCompression(),
-                                  SETTINGS.extraParagraphSpacing, SETTINGS.paragraphAlignment, viewportWidth,
-                                  viewportHeight, SETTINGS.hyphenationEnabled, SETTINGS.embeddedStyle,
-                                  SETTINGS.imageRendering)) {
+    if (!section->loadSectionFile(renderSpec)) {
       // Percent jumps, anchor jumps (footnotes/ToC) and settings-change repagination all need the
       // whole chapter up front (final page count / anchor map), so they build fully behind the
       // indexing popup. A plain resume lays out just enough to reach the landing page and lets
@@ -971,10 +1019,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
         GUI.drawPopup(renderer, tr(STR_INDEXING));
         pagesUntilFullRefresh = 1;
         const auto popupFn = [this]() { GUI.drawPopup(renderer, tr(STR_INDEXING)); };
-        built = section->createSectionFile(SETTINGS.getReaderFontId(), SETTINGS.getReaderLineCompression(),
-                                           SETTINGS.extraParagraphSpacing, SETTINGS.paragraphAlignment, viewportWidth,
-                                           viewportHeight, SETTINGS.hyphenationEnabled, SETTINGS.embeddedStyle,
-                                           SETTINGS.imageRendering, popupFn);
+        built = section->createSectionFile(renderSpec, popupFn);
       } else {
         // UINT16_MAX (resume to last page) makes target huge, so the loop below builds to
         // completion; an ordinary page target builds just past it. Show the popup only for a deep
@@ -986,10 +1031,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
           GUI.drawPopup(renderer, tr(STR_INDEXING));
           pagesUntilFullRefresh = 1;
         }
-        built = section->startBuild(SETTINGS.getReaderFontId(), SETTINGS.getReaderLineCompression(),
-                                    SETTINGS.extraParagraphSpacing, SETTINGS.paragraphAlignment, viewportWidth,
-                                    viewportHeight, SETTINGS.hyphenationEnabled, SETTINGS.embeddedStyle,
-                                    SETTINGS.imageRendering);
+        built = section->startBuild(renderSpec);
         while (built && !section->isBuildComplete() && static_cast<int>(section->pageCount) <= target) {
           built = section->buildSomeMore(BUILD_PAGES_PER_CHUNK);
         }
@@ -1105,10 +1147,13 @@ void EpubReaderActivity::render(RenderLock&& lock) {
   // Every real page turn changes currentPage, so progress durability is unaffected.
   if (currentSpineIndex != lastSavedSpineIndex || section->currentPage != lastSavedPage ||
       section->estimatedTotalPages() != lastSavedPageCount) {
-    saveProgress(currentSpineIndex, section->currentPage, section->estimatedTotalPages());
-    lastSavedSpineIndex = currentSpineIndex;
-    lastSavedPage = section->currentPage;
-    lastSavedPageCount = section->estimatedTotalPages();
+    // Only mark this position as saved on success -- a failed write (e.g. a transient SD error)
+    // must stay eligible for retry on the next render, or the failure would be silently permanent.
+    if (saveProgress(currentSpineIndex, section->currentPage, section->estimatedTotalPages())) {
+      lastSavedSpineIndex = currentSpineIndex;
+      lastSavedPage = section->currentPage;
+      lastSavedPageCount = section->estimatedTotalPages();
+    }
   }
 
   if (showBookmarkMessage && qsState == QuickSettingsState::CLOSED) {
@@ -1131,20 +1176,14 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     pendingScreenshot = false;
     ScreenshotUtil::takeScreenshot(renderer);
   }
+
+  lastRenderCompleteMs = millis();
 }
 
-void EpubReaderActivity::saveProgress(int spineIndex, int currentPage, int pageCount) {
-  uint8_t data[6];
-  data[0] = currentSpineIndex & 0xFF;
-  data[1] = (currentSpineIndex >> 8) & 0xFF;
-  data[2] = currentPage & 0xFF;
-  data[3] = (currentPage >> 8) & 0xFF;
-  data[4] = pageCount & 0xFF;
-  data[5] = (pageCount >> 8) & 0xFF;
-  if (ProgressFile::writeAtomic(epub->getCachePath(), data, sizeof(data))) {
-    LOG_DBG("ERS", "Progress saved: Chapter %d, Page %d", spineIndex, currentPage);
-  } else {
+bool EpubReaderActivity::saveProgress(int spineIndex, int currentPage, int pageCount) {
+  if (!EpubReaderUtils::saveProgress(*epub, spineIndex, currentPage, pageCount)) {
     LOG_ERR("ERS", "Could not save progress!");
+    return false;
   }
 
   // Push the percent into the home cache so the next home entry paints the
@@ -1159,6 +1198,7 @@ void EpubReaderActivity::saveProgress(int spineIndex, int currentPage, int pageC
       (spineCount > 0 && currentSpineIndex == spineCount - 1 && pageCount > 0 && currentPage >= pageCount - 1);
   const int percent = atEndOfBook ? 100 : static_cast<int>(epub->calculateProgress(currentSpineIndex, 0.0f) * 100.0f);
   HomeProgressCache::getInstance().recordProgress(epub->getPath(), currentSpineIndex, static_cast<int8_t>(percent));
+  return true;
 }
 void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int orientedMarginTop,
                                         const int orientedMarginRight, const int orientedMarginBottom,
