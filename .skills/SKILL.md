@@ -222,7 +222,7 @@ Stack sizing (BYTES): 2048 simple render, 4096 network/EPUB. Monitor `uxTaskGetS
 - **UI themes** (`src/activities/home/`, `lib/UITheme/`): Classic, Lyra, Recent6 (3×2 grid, memory-safe). Asymmetric bottom menu, cascading cover-resolution fallbacks (anti-ghosting).
 - **Apps submenu** (`AppsActivity.*`): File Transfer, Stats, OPDS hub.
 - **KOReader Sync** (`KOReaderSyncActivity.*`): heuristic paragraph-level sync, prevents XML parser crashes on remote.
-- **Reading Stats v2.5** (`src/activities/stats/`): global dashboard, Reading/Finished filter (Right button), per-book analytics, 3-line title wrapping, **binary migration v4/v5 → v6 for `stats.bin`** — bump version + add migration code if layout changes.
+- **Reading Stats v2.5** (`src/activities/stats/`): global dashboard, Reading/Finished filter (Right button), per-book analytics, 3-line title wrapping, **binary migration v4–v8 → v9 for `stats.bin`** — bump version + add migration code if layout changes. Book list is uncapped and disk-paged: a resident `BookStatIndexEntry` (16 B) per book carries the count/filter/sort fields, and full 488-byte entries fault in through a 4-slot LRU cache (`ReadingStatsManager::getBook`). Whole-library sweeps must use `getBookSummary`/`forEachEntry`, never `getBook` in a loop.
 - **Stability**: deep-sleep forced session save; 3-minute session threshold prevents short-cycle corruption.
 - **Offline English Dictionary** (`Dictionary*Activity.*`, `English-Dictionary/`): pixel-perfect selection, StarDict (`dictionary.dict`+`.idx`), Levenshtein "did you mean?", lookup history.
 - **In-Reader Quick Settings (Aa) overlay**: zero-heap formatting, deferred SD writes (flash-life), custom buffering to prevent ghosting.
@@ -381,7 +381,7 @@ renderer.drawText(FONT_UI, x, y, tr(STR_LOADING), true);
 │   ├── cover.bmp         # multi-res
 │   ├── book.bin          # metadata (title, author, spine, ToC)
 │   └── sections/*.bin
-├── stats.bin             # global + per-book stats (v6)
+├── stats.bin             # global stats header + one record per book (v9)
 └── system/BasicCover.bmp # fallback
 ```
 Hash: `std::hash<std::string>{}(filepath)` — move/rename → new hash → lost progress.
@@ -402,7 +402,7 @@ rm -rf /path/to/sd/.crosspoint/epub_<hash>/sections/  # keep progress, drop sect
 ### Versions (verify in source before changing)
 - `book.bin`: v5 (`lib/Epub/Epub/BookMetadataCache.cpp`)
 - `section.bin`: v12 (`lib/Epub/Epub/Section.cpp`)
-- `stats.bin`: v6 with v4/v5 → v6 migration engine
+- `stats.bin`: v9 with v4–v8 → v9 migration engine
 
 **Rules**: bump version BEFORE layout change; mismatch → auto-invalidate or migrate; document in `docs/file-formats.md`.
 

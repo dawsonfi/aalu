@@ -29,7 +29,7 @@ void fmtDuration(uint32_t ms, char* buf, size_t n) {
 }
 }  // namespace
 
-DetailedStatsActivity::DetailedStatsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, uint8_t bookIndex)
+DetailedStatsActivity::DetailedStatsActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, uint16_t bookIndex)
     : Activity("DetailedStats", renderer, mappedInput), _bookIndex(bookIndex) {}
 
 void DetailedStatsActivity::onEnter() {

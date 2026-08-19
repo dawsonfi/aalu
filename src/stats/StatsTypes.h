@@ -4,10 +4,18 @@
 #include <cstdint>
 #include <cstring>
 
-static constexpr uint8_t STATS_MAX_BOOK_ENTRIES = 9;
+// Highest book count a v8-or-older file could hold; still the migration bound.
+static constexpr uint8_t STATS_LEGACY_MAX_BOOK_ENTRIES = 9;
+// Resident full-entry slots. The list shows 3 rows, so 4 covers the visible
+// window plus the row a detail view or session write is touching.
+static constexpr uint8_t STATS_BOOK_CACHE_SLOTS = 4;
+// Guard against a corrupt header allocating an unbounded index, not a product
+// limit -- 4000 entries is ~64 KB of index and far past any real library.
+static constexpr uint16_t STATS_MAX_INDEXED_BOOKS = 4000;
+static constexpr uint16_t STATS_INVALID_BOOK = 0xFFFF;
 static constexpr uint8_t STATS_SESSION_RING_SIZE = 7;
 static constexpr uint16_t STATS_DAY_RING_SIZE = 365;
-static constexpr uint8_t STATS_FILE_VERSION = 8;
+static constexpr uint8_t STATS_FILE_VERSION = 9;
 static constexpr uint16_t STATS_DEFAULT_GOAL_MINUTES = 30;
 
 /**
@@ -62,6 +70,36 @@ struct BookStatEntry {
 static_assert(sizeof(BookStatEntry) == 488, "BookStatEntry layout changed -- bump STATS_FILE_VERSION");
 static_assert(offsetof(BookStatEntry, progressPercent) == 464, "v6 byte-prefix broken -- breaks migration");
 
+// Resident per-book summary. Carries exactly the fields the stats list needs to
+// count, filter and sort every book, so those whole-library sweeps never read
+// the SD card; only the handful of rows actually drawn fault in the full
+// 488-byte entry. 16 bytes here versus 488 is what lets the book list grow
+// without a cap on a device with no PSRAM.
+struct BookStatIndexEntry {
+  uint32_t cacheKeyHash;
+  uint32_t totalReadingMs;
+  uint16_t diskSlot;
+  uint16_t lastReadDay;
+  uint8_t progressPercent;
+  uint8_t _pad[3];
+};
+static_assert(sizeof(BookStatIndexEntry) == 16, "BookStatIndexEntry must stay compact -- it scales with library size");
+
+namespace stats {
+
+// FNV-1a over the cacheKey. Collisions are resolved by comparing the full
+// cacheKey from the on-disk entry, so this only needs to be cheap and spread.
+inline uint32_t hashCacheKey(const char* cacheKey) {
+  uint32_t h = 2166136261u;
+  for (size_t i = 0; i < 64 && cacheKey[i] != '\0'; ++i) {
+    h ^= static_cast<uint8_t>(cacheKey[i]);
+    h *= 16777619u;
+  }
+  return h;
+}
+
+}  // namespace stats
+
 struct GlobalStats {
   uint8_t version;
   uint8_t sessionRingHead;
@@ -94,10 +132,15 @@ struct GlobalStats {
   // Baseline timestamp for the pet's hourly stat decay; 0 when never set (the
   // X4 has no RTC, so this is only stamped once time() is NTP-synced).
   uint32_t petLastReadEpoch;
+  // Authoritative book count since v9. `bookCount` above is a uint8_t that
+  // saturates at 255, so it can no longer express the real total; it is kept
+  // only so the v4..v8 migration prefixes stay byte-identical.
+  uint32_t bookCountTotal;
 };
-static_assert(sizeof(GlobalStats) == 812, "GlobalStats layout changed -- bump STATS_FILE_VERSION");
+static_assert(sizeof(GlobalStats) == 816, "GlobalStats layout changed -- bump STATS_FILE_VERSION");
 static_assert(offsetof(GlobalStats, petLastReadEpoch) == 808,
               "petLastReadEpoch must append at the v7 tail for migration");
+static_assert(offsetof(GlobalStats, bookCountTotal) == 812, "bookCountTotal must append at the v8 tail for migration");
 static_assert(offsetof(GlobalStats, totalReadingMs) == 8, "v6 byte-prefix broken -- breaks migration");
 static_assert(offsetof(GlobalStats, sessionRing) == 16, "v6 byte-prefix broken -- breaks migration");
 static_assert(offsetof(GlobalStats, dayMinutes) == 76, "day-ring offset moved -- update migration");

@@ -1,23 +1,66 @@
 #include <gtest/gtest.h>
 
+#include <cstring>
+
 #include "stats/StatsTypes.h"
 
-// stats.bin v8 binary layout is load-bearing: any change must bump the file
+// stats.bin v9 binary layout is load-bearing: any change must bump the file
 // version + migration. These guard the exact on-disk sizes.
-TEST(StatsTypes, V8StructSizes) {
+TEST(StatsTypes, V9StructSizes) {
   EXPECT_EQ(sizeof(SpeedSample), 4u);
   EXPECT_EQ(sizeof(BookStatEntry), 488u);
-  EXPECT_EQ(sizeof(GlobalStats), 812u);
+  EXPECT_EQ(sizeof(GlobalStats), 816u);
 }
 
-TEST(StatsTypes, V8PrefixMatchesPriorVersions) {
+TEST(StatsTypes, V9PrefixMatchesPriorVersions) {
   // Older layouts are strict prefixes so migration is a pure tail-append.
-  // petLastReadEpoch must sit at the v7 size (808) for v7 -> v8 to read cleanly.
+  // petLastReadEpoch sits at the v7 size (808); bookCountTotal at the v8 size.
   EXPECT_EQ(offsetof(GlobalStats, totalReadingMs), 8u);
   EXPECT_EQ(offsetof(GlobalStats, sessionRing), 16u);
   EXPECT_EQ(offsetof(GlobalStats, dayMinutes), 76u);
   EXPECT_EQ(offsetof(GlobalStats, petLastReadEpoch), 808u);
+  EXPECT_EQ(offsetof(GlobalStats, bookCountTotal), 812u);
   EXPECT_EQ(offsetof(BookStatEntry, progressPercent), 464u);
+}
+
+// The resident index is what removes the old 9-book cap: it must stay small,
+// because its size is multiplied by the whole library.
+TEST(StatsTypes, IndexEntryStaysCompact) {
+  EXPECT_EQ(sizeof(BookStatIndexEntry), 16u);
+  // A 1000-book library must cost far less than holding full entries would.
+  EXPECT_LT(1000u * sizeof(BookStatIndexEntry), 1000u * sizeof(BookStatEntry) / 25u);
+}
+
+TEST(StatsTypes, EntryOffsetsAreDenseAndSeekable) {
+  // Row i must be reachable by arithmetic alone -- that is what makes paging
+  // in a single row an O(1) seek instead of a scan.
+  const uint32_t slot0 = sizeof(GlobalStats);
+  const uint32_t slot7 = sizeof(GlobalStats) + 7u * sizeof(BookStatEntry);
+  EXPECT_EQ(slot7 - slot0, 7u * 488u);
+}
+
+TEST(StatsHash, SameKeyHashesEqualAndDiffersAcrossKeys) {
+  char a[64] = "epub_12345";
+  char b[64] = "epub_12345";
+  char c[64] = "epub_54321";
+  EXPECT_EQ(stats::hashCacheKey(a), stats::hashCacheKey(b));
+  EXPECT_NE(stats::hashCacheKey(a), stats::hashCacheKey(c));
+}
+
+TEST(StatsHash, EmptyKeyIsStable) {
+  char empty[64] = "";
+  EXPECT_EQ(stats::hashCacheKey(empty), stats::hashCacheKey(empty));
+}
+
+TEST(StatsHash, StopsAtNulAndIgnoresTrailingGarbage) {
+  // Entries are memset then strncpy'd, but a short key must not pick up bytes
+  // past the terminator or a reused slot would hash differently.
+  char clean[64] = {};
+  char dirty[64] = {};
+  memcpy(clean, "epub_9", 6);
+  memcpy(dirty, "epub_9", 6);
+  memset(dirty + 7, 0x7F, 40);
+  EXPECT_EQ(stats::hashCacheKey(clean), stats::hashCacheKey(dirty));
 }
 
 TEST(StatsStreak, FirstReadingStartsStreakAtOne) {

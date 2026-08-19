@@ -33,7 +33,9 @@ static constexpr int COVER_PAD = 6;
 // (added to the cache but never opened past the cover, or imported from a
 // path that pre-populated metadata). They clutter the list with no useful
 // signal.
-static bool isStatsVisible(const BookStatEntry& book) { return book.progressPercent > 0 && book.totalReadingMs > 0; }
+static bool isStatsVisible(const BookStatIndexEntry& book) {
+  return book.progressPercent > 0 && book.totalReadingMs > 0;
+}
 
 // -----------------------------------------------------------------------
 // Static helpers
@@ -66,10 +68,10 @@ void StatsActivity::formatDuration(char* buf, size_t bufLen, uint32_t ms) {
  */
 // Counts books in the current view mode (Reading vs Finished). Hidden books
 // (0% progress or 0 reading time) are excluded — see isStatsVisible.
-uint8_t StatsActivity::getVisibleBookCount() const {
-  uint8_t count = 0;
-  for (uint8_t i = 0; i < StatsManager.getBookCount(); ++i) {
-    const BookStatEntry& book = StatsManager.getBook(i);
+uint16_t StatsActivity::getVisibleBookCount() const {
+  uint16_t count = 0;
+  for (uint16_t i = 0; i < StatsManager.getBookCount(); ++i) {
+    const BookStatIndexEntry& book = StatsManager.getBookSummary(i);
     if (!isStatsVisible(book)) continue;
     const bool isDone = (book.progressPercent >= 95);
     if (isDone == showingFinished) count++;
@@ -100,38 +102,44 @@ void StatsActivity::prepareMissingCovers() {
   // white-margin bug that came from drawBitmap's aspect-fit fallback.
   static constexpr int kRegenHeight = HomeRenderer::kThumbnailCoverHeight;
 
-  const uint8_t total = StatsManager.getBookCount();
+  const uint16_t total = StatsManager.getBookCount();
   if (total == 0) return;
 
-  bool popupShown = false;
-  Rect popupRect;
+  CoverRegenCtx ctx{this, total, false, Rect{}};
+  StatsManager.forEachEntry(&ctx, &StatsActivity::regenCoverForEntry);
+}
 
-  for (uint8_t i = 0; i < total; ++i) {
-    const BookStatEntry& book = StatsManager.getBook(i);
-    if (!isStatsVisible(book)) continue;
-    if (book.thumbBmpPath[0] == '\0') continue;
-    if (book.bookPath[0] == '\0') continue;
+// Runs once per book from forEachEntry's single file handle. Needs the paths and
+// so cannot work off the resident summary alone.
+void StatsActivity::regenCoverForEntry(void* rawCtx, uint16_t i, const BookStatEntry& book) {
+  auto& ctx = *static_cast<CoverRegenCtx*>(rawCtx);
+  auto& renderer = ctx.self->renderer;
+  static constexpr int kRegenHeight = HomeRenderer::kThumbnailCoverHeight;
+  {
+    if (!(book.progressPercent > 0 && book.totalReadingMs > 0)) return;
+    if (book.thumbBmpPath[0] == '\0') return;
+    if (book.bookPath[0] == '\0') return;
 
     const std::string thumbPath = UITheme::getCoverThumbPath(std::string(book.thumbBmpPath), kRegenHeight);
-    if (Storage.exists(thumbPath.c_str())) continue;
+    if (Storage.exists(thumbPath.c_str())) return;
 
     // The book file itself may have moved/been deleted - skip silently.
-    if (!Storage.exists(book.bookPath)) continue;
+    if (!Storage.exists(book.bookPath)) return;
 
     // Only EPUB regen is wired up right now. TXT/XTC entries fall through to
     // the placeholder in the row renderer (matches home/group behaviour).
-    if (!FsHelpers::hasEpubExtension(std::string(book.bookPath))) continue;
+    if (!FsHelpers::hasEpubExtension(std::string(book.bookPath))) return;
 
-    if (!popupShown) {
-      popupShown = true;
-      popupRect = GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
+    if (!ctx.popupShown) {
+      ctx.popupShown = true;
+      ctx.popupRect = GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
     }
-    GUI.fillPopupProgress(renderer, popupRect, 10 + (i * 90) / std::max<uint8_t>(total, 1));
+    GUI.fillPopupProgress(renderer, ctx.popupRect, 10 + (i * 90) / std::max<uint16_t>(ctx.total, 1));
 
     Epub epub(std::string(book.bookPath), "/.crosspoint");
     if (!epub.load(false, true)) {
       LOG_DBG("STATS", "Could not load EPUB for cover regen: %s", book.bookPath);
-      continue;
+      return;
     }
     if (!epub.generateThumbBmp(kRegenHeight)) {
       LOG_DBG("STATS", "Cover regen failed (no embedded image?) for %s", book.bookPath);
@@ -232,22 +240,22 @@ void StatsActivity::loop() {
   }
 }
 
-uint8_t StatsActivity::resolveSelectedMemoryIndex() const {
+uint16_t StatsActivity::resolveSelectedMemoryIndex() const {
   int currentMatch = 0;
-  for (uint8_t j = 0; j < StatsManager.getBookCount(); ++j) {
-    const BookStatEntry& book = StatsManager.getBook(j);
+  for (uint16_t j = 0; j < StatsManager.getBookCount(); ++j) {
+    const BookStatIndexEntry& book = StatsManager.getBookSummary(j);
     if (!isStatsVisible(book)) continue;
     const bool isDone = (book.progressPercent >= 95);
     if (isDone != showingFinished) continue;
     if (currentMatch == selectedBookIndex) return j;
     currentMatch++;
   }
-  return 0xFF;
+  return STATS_INVALID_BOOK;
 }
 
 void StatsActivity::confirmRemoveFocusedBook() {
-  const uint8_t memoryIndex = resolveSelectedMemoryIndex();
-  if (memoryIndex == 0xFF) return;
+  const uint16_t memoryIndex = resolveSelectedMemoryIndex();
+  if (memoryIndex == STATS_INVALID_BOOK) return;
 
   // Snapshot the cacheKey now -- the dialog runs as a sub-activity, so the
   // underlying array could in theory be mutated before the handler fires
@@ -262,17 +270,19 @@ void StatsActivity::confirmRemoveFocusedBook() {
   auto handler = [this, cacheKey = std::string(cacheKey)](const ActivityResult& result) {
     if (result.isCancelled) return;
 
-    uint8_t target = 0xFF;
-    for (uint8_t i = 0; i < StatsManager.getBookCount(); ++i) {
+    uint16_t target = STATS_INVALID_BOOK;
+    const uint32_t wantedHash = stats::hashCacheKey(cacheKey.c_str());
+    for (uint16_t i = 0; i < StatsManager.getBookCount(); ++i) {
+      if (StatsManager.getBookSummary(i).cacheKeyHash != wantedHash) continue;
       if (strncmp(StatsManager.getBook(i).cacheKey, cacheKey.c_str(), sizeof(BookStatEntry::cacheKey)) == 0) {
         target = i;
         break;
       }
     }
-    if (target == 0xFF) return;
+    if (target == STATS_INVALID_BOOK) return;
     if (!StatsManager.removeBook(target)) return;
 
-    const uint8_t remaining = getVisibleBookCount();
+    const uint16_t remaining = getVisibleBookCount();
     if (remaining == 0) {
       selectedBookIndex = 0;
     } else if (selectedBookIndex >= static_cast<int>(remaining)) {
@@ -833,24 +843,24 @@ void StatsActivity::renderBookPanel(int panelY, int panelH, int screenW) const {
     const int visibleIdx = scrollOffset + i;
     const int rowY = panelY + i * rowH;
 
-    const BookStatEntry* targetBook = nullptr;
+    uint16_t targetIndex = STATS_INVALID_BOOK;
     int currentMatch = 0;
 
-    for (uint8_t j = 0; j < StatsManager.getBookCount(); ++j) {
-      const BookStatEntry& book = StatsManager.getBook(j);
+    for (uint16_t j = 0; j < StatsManager.getBookCount(); ++j) {
+      const BookStatIndexEntry& book = StatsManager.getBookSummary(j);
       if (!isStatsVisible(book)) continue;
       const bool isDone = (book.progressPercent >= 95);
       if (isDone != showingFinished) continue;
 
       if (currentMatch == visibleIdx) {
-        targetBook = &book;
+        targetIndex = j;
         break;
       }
       currentMatch++;
     }
 
-    if (targetBook) {
-      renderBookRow(0, rowY, screenW, rowH, *targetBook, visibleIdx == selectedBookIndex);
+    if (targetIndex != STATS_INVALID_BOOK) {
+      renderBookRow(0, rowY, screenW, rowH, StatsManager.getBook(targetIndex), visibleIdx == selectedBookIndex);
     }
   }
 }

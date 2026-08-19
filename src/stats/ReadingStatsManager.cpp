@@ -1,134 +1,281 @@
 #include "stats/ReadingStatsManager.h"
 
 #include <HalStorage.h>
+#include <Memory.h>
 
+#include <algorithm>
 #include <cstring>
 #include <ctime>
 
 #include "CrossPointSettings.h"
 
+namespace {
+// Returned when a row cannot be read, so callers still get a valid reference.
+const BookStatEntry kEmptyBook{};
+}  // namespace
+
+void ReadingStatsManager::invalidateCache() {
+  for (uint8_t s = 0; s < STATS_BOOK_CACHE_SLOTS; ++s) {
+    cacheSlotFor[s] = STATS_INVALID_BOOK;
+    cacheUsedAt[s] = 0;
+  }
+  cacheClock = 0;
+}
+
+void ReadingStatsManager::refreshSummary(uint16_t index, const BookStatEntry& entry) {
+  BookStatIndexEntry& summary = bookIndex[index];
+  summary.cacheKeyHash = stats::hashCacheKey(entry.cacheKey);
+  summary.totalReadingMs = entry.totalReadingMs;
+  summary.lastReadDay = entry.lastReadDay;
+  summary.progressPercent = entry.progressPercent;
+}
+
+bool ReadingStatsManager::readEntry(uint16_t diskSlot, BookStatEntry& out) const {
+  FsFile f;
+  if (!Storage.openFileForRead("STATS", STATS_FILE_PATH, f)) return false;
+  bool ok = f.seek(entryOffset(diskSlot));
+  if (ok) ok = f.read(&out, sizeof(BookStatEntry)) == static_cast<int>(sizeof(BookStatEntry));
+  f.close();
+  return ok;
+}
+
+bool ReadingStatsManager::writeEntry(uint16_t diskSlot, const BookStatEntry& entry) {
+  // O_RDWR|O_CREAT, not openFileForWrite -- that carries O_TRUNC and would
+  // discard every other book's record on each single-row update.
+  FsFile f = Storage.open(STATS_FILE_PATH, O_RDWR | O_CREAT);
+  if (!f) {
+    LOG_ERR("STATS", "Could not open stats file to update slot %u", static_cast<unsigned>(diskSlot));
+    return false;
+  }
+  bool ok = f.seek(entryOffset(diskSlot));
+  if (ok) ok = f.write(&entry, sizeof(BookStatEntry)) == sizeof(BookStatEntry);
+  f.flush();
+  f.close();
+  if (!ok) LOG_ERR("STATS", "Failed writing book entry at slot %u", static_cast<unsigned>(diskSlot));
+  return ok;
+}
+
+bool ReadingStatsManager::appendEntry(const BookStatEntry& entry, uint16_t& diskSlotOut) {
+  const uint16_t slot = static_cast<uint16_t>(global.bookCountTotal);
+  if (!writeEntry(slot, entry)) return false;
+  global.bookCountTotal++;
+  global.bookCount = static_cast<uint8_t>(std::min<uint32_t>(global.bookCountTotal, 255u));
+  diskSlotOut = slot;
+  return true;
+}
+
+const BookStatEntry& ReadingStatsManager::getBook(uint16_t index) {
+  if (index >= bookIndex.size()) return kEmptyBook;
+  const uint16_t diskSlot = bookIndex[index].diskSlot;
+
+  for (uint8_t s = 0; s < STATS_BOOK_CACHE_SLOTS; ++s) {
+    if (cacheSlotFor[s] == diskSlot) {
+      cacheUsedAt[s] = ++cacheClock;
+      return cache[s];
+    }
+  }
+
+  uint8_t victim = 0;
+  for (uint8_t s = 1; s < STATS_BOOK_CACHE_SLOTS; ++s) {
+    if (cacheUsedAt[s] < cacheUsedAt[victim]) victim = s;
+  }
+
+  if (!readEntry(diskSlot, cache[victim])) {
+    LOG_ERR("STATS", "Failed reading book entry at slot %u", static_cast<unsigned>(diskSlot));
+    cacheSlotFor[victim] = STATS_INVALID_BOOK;
+    cacheUsedAt[victim] = 0;
+    return kEmptyBook;
+  }
+  cacheSlotFor[victim] = diskSlot;
+  cacheUsedAt[victim] = ++cacheClock;
+  return cache[victim];
+}
+
+void ReadingStatsManager::forEachEntry(void* ctx, EntryVisitor visit) {
+  if (bookIndex.empty()) return;
+  FsFile f;
+  if (!Storage.openFileForRead("STATS", STATS_FILE_PATH, f)) {
+    LOG_ERR("STATS", "Could not open stats file to stream entries");
+    return;
+  }
+  for (uint16_t i = 0; i < bookIndex.size(); ++i) {
+    if (!f.seek(entryOffset(bookIndex[i].diskSlot))) break;
+    if (f.read(&scratch, sizeof(BookStatEntry)) != static_cast<int>(sizeof(BookStatEntry))) break;
+    visit(ctx, i, scratch);
+  }
+  f.close();
+}
+
 bool ReadingStatsManager::load() {
+  bookIndex.clear();
+  invalidateCache();
+
   FsFile f;
   if (!Storage.openFileForRead("STATS", STATS_FILE_PATH, f)) {
     LOG_DBG("STATS", "No stats file found, starting fresh");
     global = GlobalStats{};
     global.version = STATS_FILE_VERSION;
     global.goalTarget = STATS_DEFAULT_GOAL_MINUTES;
-    memset(books, 0, sizeof(books));
     return true;
   }
 
-  uint8_t fileVersion;
+  uint8_t fileVersion = 0;
   f.read(&fileVersion, 1);
   f.seek(0);
 
   if (fileVersion < STATS_FILE_VERSION) {
-    LOG_INF("STATS", "Migrating stats %d -> %d", fileVersion, STATS_FILE_VERSION);
-
-    global = GlobalStats{};
-    // Each older layout is a strict prefix of the current struct, so reading the
-    // old byte count into a zero-initialised struct leaves the new tail at 0.
-    // GlobalStats sizes: v4=40, v5/v6=44, v7=808 (v8 appends petLastReadEpoch).
-    size_t globalSize;
-    if (fileVersion == 4) {
-      globalSize = 40;
-    } else if (fileVersion == 7) {
-      globalSize = 808;
-    } else {
-      globalSize = 44;  // v5, v6
-    }
-    f.read(&global, globalSize);
-    global.version = STATS_FILE_VERSION;
-
-    for (uint8_t i = 0; i < global.bookCount; ++i) {
-      memset(&books[i], 0, sizeof(BookStatEntry));
-      if (fileVersion == 7) {
-        // v7 entry is already the current 488-byte layout; copy it whole.
-        f.read(&books[i], 488);
-      } else if (fileVersion == 5) {
-        // v5 entry was 464 bytes. lastSessionMs (v6) is a new 4-byte field.
-        // Read everything up to totalPagesRead (460 bytes)
-        f.read(&books[i], 460);
-        // lastSessionMs is new in v6 at this offset, so we skip reading it from v5 file
-        // and read the remaining v5 data (progressPercent + pads) into the new offset
-        f.read(&books[i].progressPercent, 4);
-      } else if (fileVersion == 6) {
-        // v6 entry was 468 bytes; v7 keeps that exact prefix and appends a zeroed tail.
-        f.read(&books[i], 468);
-      } else {
-        // v4 migration (396 bytes)
-        f.read(&books[i], 396);
-      }
-    }
-    if (global.goalTarget == 0) global.goalTarget = STATS_DEFAULT_GOAL_MINUTES;
-    stats::evaluateAchievements(global, -1);
     f.close();
-    save();  // Force clean save in V7 format
-    return true;
+    return migrateFrom(fileVersion);
   }
 
-  // Standard V6 load logic continues...
   f.read(&global, sizeof(GlobalStats));
-  for (uint8_t i = 0; i < global.bookCount; ++i) {
-    f.read(&books[i], sizeof(BookStatEntry));
+  global.version = STATS_FILE_VERSION;
+
+  uint32_t count = global.bookCountTotal;
+  if (count > STATS_MAX_INDEXED_BOOKS) {
+    LOG_ERR("STATS", "bookCountTotal %u exceeds %u, clamping", static_cast<unsigned>(count),
+            static_cast<unsigned>(STATS_MAX_INDEXED_BOOKS));
+    count = STATS_MAX_INDEXED_BOOKS;
+  }
+
+  bookIndex.reserve(count);
+  for (uint32_t i = 0; i < count; ++i) {
+    if (f.read(&scratch, sizeof(BookStatEntry)) != static_cast<int>(sizeof(BookStatEntry))) {
+      LOG_ERR("STATS", "Truncated stats file: got %u of %u entries", static_cast<unsigned>(i),
+              static_cast<unsigned>(count));
+      break;
+    }
+    bookIndex.push_back(BookStatIndexEntry{});
+    bookIndex.back().diskSlot = static_cast<uint16_t>(i);
+    refreshSummary(static_cast<uint16_t>(bookIndex.size() - 1), scratch);
   }
   f.close();
+
+  if (bookIndex.size() != global.bookCountTotal) {
+    global.bookCountTotal = static_cast<uint32_t>(bookIndex.size());
+    global.bookCount = static_cast<uint8_t>(std::min<size_t>(bookIndex.size(), 255u));
+    saveGlobal();
+  }
+
+  sortByProgress();
   return true;
 }
 
-bool ReadingStatsManager::save() {
+// v4..v8 held at most STATS_LEGACY_MAX_BOOK_ENTRIES rows, so the whole old
+// library fits in one bounded transient buffer; the file is then rewritten in
+// v9 layout. Each older layout is a strict prefix of the current struct, so
+// reading the old byte count into a zero-initialised struct leaves the new
+// tail at 0. GlobalStats sizes: v4=40, v5/v6=44, v7=808, v8=812.
+bool ReadingStatsManager::migrateFrom(uint8_t fileVersion) {
+  LOG_INF("STATS", "Migrating stats %d -> %d", fileVersion, STATS_FILE_VERSION);
+
   FsFile f;
-  if (!Storage.openFileForWrite("STATS", STATS_FILE_PATH, f)) {
+  if (!Storage.openFileForRead("STATS", STATS_FILE_PATH, f)) return false;
+
+  global = GlobalStats{};
+  size_t globalSize;
+  if (fileVersion == 4) {
+    globalSize = 40;
+  } else if (fileVersion == 7) {
+    globalSize = 808;
+  } else if (fileVersion == 8) {
+    globalSize = 812;
+  } else {
+    globalSize = 44;  // v5, v6
+  }
+  f.read(&global, globalSize);
+  global.version = STATS_FILE_VERSION;
+
+  const uint8_t legacyCount = std::min<uint8_t>(global.bookCount, STATS_LEGACY_MAX_BOOK_ENTRIES);
+  // 9 x 488 B transient; far past the 256-byte stack budget, and only alive for
+  // the duration of this one-shot migration.
+  auto legacy = makeUniqueNoThrow<BookStatEntry[]>(STATS_LEGACY_MAX_BOOK_ENTRIES);
+  if (!legacy) {
+    LOG_ERR("STATS", "malloc failed: %u", static_cast<unsigned>(STATS_LEGACY_MAX_BOOK_ENTRIES * sizeof(BookStatEntry)));
+    f.close();
+    return false;
+  }
+  memset(legacy.get(), 0, STATS_LEGACY_MAX_BOOK_ENTRIES * sizeof(BookStatEntry));
+
+  for (uint8_t i = 0; i < legacyCount; ++i) {
+    if (fileVersion == 7 || fileVersion == 8) {
+      f.read(&legacy[i], 488);
+    } else if (fileVersion == 5) {
+      // v5 entry was 464 bytes. lastSessionMs (v6) is a new 4-byte field, so
+      // read up to totalPagesRead then land the v5 tail at its new offset.
+      f.read(&legacy[i], 460);
+      f.read(&legacy[i].progressPercent, 4);
+    } else if (fileVersion == 6) {
+      // v6 entry was 468 bytes; v7 keeps that exact prefix.
+      f.read(&legacy[i], 468);
+    } else {
+      f.read(&legacy[i], 396);  // v4
+    }
+  }
+  f.close();
+
+  if (global.goalTarget == 0) global.goalTarget = STATS_DEFAULT_GOAL_MINUTES;
+  stats::evaluateAchievements(global, -1);
+
+  global.bookCountTotal = legacyCount;
+  global.bookCount = legacyCount;
+
+  FsFile out;
+  if (!Storage.openFileForWrite("STATS", STATS_FILE_PATH, out)) {
+    LOG_ERR("STATS", "Could not open stats file to write migrated layout");
+    return false;
+  }
+  out.write(&global, sizeof(GlobalStats));
+  for (uint8_t i = 0; i < legacyCount; ++i) {
+    out.write(&legacy[i], sizeof(BookStatEntry));
+  }
+  out.flush();
+  out.close();
+
+  bookIndex.reserve(legacyCount);
+  for (uint8_t i = 0; i < legacyCount; ++i) {
+    bookIndex.push_back(BookStatIndexEntry{});
+    bookIndex.back().diskSlot = i;
+    refreshSummary(i, legacy[i]);
+  }
+  invalidateCache();
+  sortByProgress();
+  return true;
+}
+
+bool ReadingStatsManager::saveGlobal() {
+  FsFile f = Storage.open(STATS_FILE_PATH, O_RDWR | O_CREAT);
+  if (!f) {
     LOG_ERR("STATS", "Could not open stats file for write");
     return false;
   }
-
-  uint8_t rawGlobal[sizeof(GlobalStats)];
-  memcpy(rawGlobal, &global, sizeof(GlobalStats));
-  f.write(rawGlobal, sizeof(GlobalStats));
-
-  for (uint8_t i = 0; i < global.bookCount; ++i) {
-    uint8_t rawBook[sizeof(BookStatEntry)];
-    memcpy(rawBook, &books[i], sizeof(BookStatEntry));
-    f.write(rawBook, sizeof(BookStatEntry));
-  }
-
+  bool ok = f.seek(0);
+  if (ok) ok = f.write(&global, sizeof(GlobalStats)) == sizeof(GlobalStats);
+  f.flush();
   f.close();
-  LOG_DBG("STATS", "Stats saved");
-  return true;
+  if (!ok) LOG_ERR("STATS", "Failed writing stats header");
+  return ok;
 }
 
-int ReadingStatsManager::findBook(const char* cacheKey) const {
-  for (uint8_t i = 0; i < global.bookCount; ++i) {
-    if (strncmp(books[i].cacheKey, cacheKey, sizeof(books[i].cacheKey)) == 0) {
-      return i;
-    }
+// Matches on the resident hash first, confirming against the full cacheKey from
+// disk only on a hash hit, so a lookup costs at most one entry read.
+int ReadingStatsManager::findBook(const char* cacheKey) {
+  const uint32_t wanted = stats::hashCacheKey(cacheKey);
+  for (uint16_t i = 0; i < bookIndex.size(); ++i) {
+    if (bookIndex[i].cacheKeyHash != wanted) continue;
+    if (!readEntry(bookIndex[i].diskSlot, scratch)) continue;
+    if (strncmp(scratch.cacheKey, cacheKey, sizeof(scratch.cacheKey)) == 0) return i;
   }
   return -1;
 }
 
-void ReadingStatsManager::bringBookToFront(uint8_t index) {
-  if (index == 0) return;
-  BookStatEntry tmp;
-  memcpy(&tmp, &books[index], sizeof(BookStatEntry));
-  for (uint8_t i = index; i > 0; --i) {
-    memcpy(&books[i], &books[i - 1], sizeof(BookStatEntry));
-  }
-  memcpy(&books[0], &tmp, sizeof(BookStatEntry));
-}
-
+// Sorts the resident index only -- on-disk entries never move, so reordering
+// the list is free of SD I/O. std::stable_sort keeps equal-progress rows in
+// their existing relative order instead of shuffling them each save.
 void ReadingStatsManager::sortByProgress() {
-  // Insertion sort descending by progressPercent — max 9 elements
-  for (uint8_t i = 1; i < global.bookCount; ++i) {
-    BookStatEntry tmp;
-    memcpy(&tmp, &books[i], sizeof(BookStatEntry));
-    int8_t j = static_cast<int8_t>(i) - 1;
-    while (j >= 0 && books[j].progressPercent < tmp.progressPercent) {
-      memcpy(&books[j + 1], &books[j], sizeof(BookStatEntry));
-      j--;
-    }
-    memcpy(&books[j + 1], &tmp, sizeof(BookStatEntry));
-  }
+  std::stable_sort(bookIndex.begin(), bookIndex.end(), [](const BookStatIndexEntry& a, const BookStatIndexEntry& b) {
+    return a.progressPercent > b.progressPercent;
+  });
 }
 
 void ReadingStatsManager::beginSession(const char* cacheKey, const char* title, const char* author,
@@ -138,32 +285,48 @@ void ReadingStatsManager::beginSession(const char* cacheKey, const char* title, 
 
   int idx = findBook(cacheKey);
   if (idx == -1) {
-    // New book: Add it and increment count, but don't force it to front yet
-    // Sorting will happen during the first save in endSession()
-    if (global.bookCount < STATS_MAX_BOOK_ENTRIES) {
-      idx = global.bookCount;
-      global.bookCount++;
-    } else {
-      // If full, reuse the last (least progress) slot
-      idx = STATS_MAX_BOOK_ENTRIES - 1;
+    if (bookIndex.size() >= STATS_MAX_INDEXED_BOOKS) {
+      LOG_ERR("STATS", "Book index full at %u entries, not tracking this book",
+              static_cast<unsigned>(bookIndex.size()));
+      sessionActive = false;
+      sessionBookIndex = STATS_INVALID_BOOK;
+      return;
     }
 
-    memset(&books[idx], 0, sizeof(BookStatEntry));
-    strncpy(books[idx].cacheKey, cacheKey, sizeof(books[idx].cacheKey) - 1);
-    strncpy(books[idx].title, title, sizeof(books[idx].title) - 1);
-    strncpy(books[idx].author, author, sizeof(books[idx].author) - 1);
-    // ... rest of the strncpy calls for books[idx] ...
-    sessionBookIndex = idx;
+    memset(&scratch, 0, sizeof(BookStatEntry));
+    strncpy(scratch.cacheKey, cacheKey, sizeof(scratch.cacheKey) - 1);
+    strncpy(scratch.title, title, sizeof(scratch.title) - 1);
+    strncpy(scratch.author, author, sizeof(scratch.author) - 1);
+    strncpy(scratch.bookPath, bookPath, sizeof(scratch.bookPath) - 1);
+    strncpy(scratch.thumbBmpPath, thumbBmpPath, sizeof(scratch.thumbBmpPath) - 1);
+
+    uint16_t diskSlot = 0;
+    if (!appendEntry(scratch, diskSlot)) {
+      sessionActive = false;
+      sessionBookIndex = STATS_INVALID_BOOK;
+      return;
+    }
+    bookIndex.push_back(BookStatIndexEntry{});
+    bookIndex.back().diskSlot = diskSlot;
+    sessionBookIndex = static_cast<uint16_t>(bookIndex.size() - 1);
+    refreshSummary(sessionBookIndex, scratch);
+    saveGlobal();
   } else {
-    // Existing book: Just update the index and metadata, NO bringBookToFront()
-    sessionBookIndex = static_cast<uint8_t>(idx);
-    strncpy(books[idx].bookPath, bookPath, sizeof(books[idx].bookPath) - 1);
-    strncpy(books[idx].thumbBmpPath, thumbBmpPath, sizeof(books[idx].thumbBmpPath) - 1);
+    sessionBookIndex = static_cast<uint16_t>(idx);
+    if (!readEntry(bookIndex[sessionBookIndex].diskSlot, scratch)) {
+      sessionActive = false;
+      sessionBookIndex = STATS_INVALID_BOOK;
+      return;
+    }
+    strncpy(scratch.bookPath, bookPath, sizeof(scratch.bookPath) - 1);
+    strncpy(scratch.thumbBmpPath, thumbBmpPath, sizeof(scratch.thumbBmpPath) - 1);
     // NOTE: progressPercent is intentionally NOT overwritten here. The value
     // passed in is byte-weighted at chapter-start (read from progress.bin),
     // which is less precise than the page-precise value endSession() saves on
     // exit. Overwriting on every entry would cause the Stats screen to flicker
     // back to a coarser percentage every time the user opens the book.
+    writeEntry(bookIndex[sessionBookIndex].diskSlot, scratch);
+    invalidateCache();
   }
 }
 
@@ -178,25 +341,32 @@ void ReadingStatsManager::endSession(uint8_t progressPercent, uint32_t sessionPa
   // at zero for users whose typical sessions are under three minutes.
   const bool longEnoughForLastSession = (elapsedMs >= STATS_MIN_SESSION_MS);
 
-  if (sessionBookIndex < global.bookCount) {
+  const bool haveBook = sessionBookIndex < bookIndex.size();
+  const uint16_t diskSlot = haveBook ? bookIndex[sessionBookIndex].diskSlot : 0;
+  if (haveBook && !readEntry(diskSlot, scratch)) {
+    LOG_ERR("STATS", "Failed reading book entry at slot %u on session end", static_cast<unsigned>(diskSlot));
+    return;
+  }
+
+  if (haveBook) {
     // Always reflect the user's true current position. The reader is the only
     // caller now (the deep-sleep safety-net endSession(0, 0) was removed in
     // main.cpp:enterDeepSleep) and it always passes a precise, page-accurate
     // value, so a smaller percentage means the user really did navigate
     // backward. The "Finished Books" lifetime counter only ever increments,
     // so regressing from 100% does not decrement it.
-    if (progressPercent == 100 && books[sessionBookIndex].progressPercent < 100) {
+    if (progressPercent == 100 && scratch.progressPercent < 100) {
       global.totalBooksFinished++;
     }
-    books[sessionBookIndex].progressPercent = progressPercent;
+    scratch.progressPercent = progressPercent;
 
     if (longEnoughForLastSession) {
-      books[sessionBookIndex].lastSessionMs = elapsedMs;
+      scratch.lastSessionMs = elapsedMs;
     }
 
-    books[sessionBookIndex].totalReadingMs += elapsedMs;
-    books[sessionBookIndex].sessionCount++;
-    books[sessionBookIndex].totalPagesRead += sessionPagesTurned;
+    scratch.totalReadingMs += elapsedMs;
+    scratch.sessionCount++;
+    scratch.totalPagesRead += sessionPagesTurned;
   }
 
   global.totalReadingMs += elapsedMs;
@@ -218,8 +388,8 @@ void ReadingStatsManager::endSession(uint8_t progressPercent, uint32_t sessionPa
     const uint16_t minutes = static_cast<uint16_t>(elapsedMs / 60000UL);
     stats::updatePet(global, nowEpoch, sessionPagesTurned);
     stats::recordReadingDay(global, today, minutes);
-    if (sessionBookIndex < global.bookCount) {
-      BookStatEntry& b = books[sessionBookIndex];
+    if (haveBook) {
+      BookStatEntry& b = scratch;
       b.lastReadDay = today;
       if (sessionPagesTurned > 0 && elapsedMs > 0) {
         const uint32_t pph = static_cast<uint32_t>(sessionPagesTurned) * 3600000UL / elapsedMs;
@@ -240,29 +410,53 @@ void ReadingStatsManager::endSession(uint8_t progressPercent, uint32_t sessionPa
   }
   stats::evaluateAchievements(global, sessionEndHour);
 
+  if (haveBook) {
+    writeEntry(diskSlot, scratch);
+    refreshSummary(sessionBookIndex, scratch);
+    invalidateCache();
+  }
+  saveGlobal();
   sortByProgress();
-  save();
 }
 
-bool ReadingStatsManager::removeBook(uint8_t index) {
-  if (index >= global.bookCount) return false;
+bool ReadingStatsManager::removeBook(uint16_t index) {
+  if (index >= bookIndex.size()) return false;
 
   // If the active session is for this book, drop the binding so endSession
   // doesn't write back to a stale slot after the shift.
   if (sessionActive && sessionBookIndex == index) {
     sessionActive = false;
-    sessionBookIndex = 0xFF;
-  } else if (sessionActive && sessionBookIndex > index && sessionBookIndex < global.bookCount) {
+    sessionBookIndex = STATS_INVALID_BOOK;
+  }
+
+  const uint16_t removedSlot = bookIndex[index].diskSlot;
+
+  // Entries after the hole shift down one slot on disk so the file stays a
+  // dense array indexable by slot. Only ever runs on an explicit user delete.
+  for (uint16_t slot = removedSlot; slot + 1 < global.bookCountTotal; ++slot) {
+    if (!readEntry(static_cast<uint16_t>(slot + 1), scratch)) {
+      LOG_ERR("STATS", "Failed compacting stats at slot %u", static_cast<unsigned>(slot + 1));
+      return false;
+    }
+    if (!writeEntry(slot, scratch)) return false;
+  }
+
+  bookIndex.erase(bookIndex.begin() + index);
+  for (auto& summary : bookIndex) {
+    if (summary.diskSlot > removedSlot) summary.diskSlot--;
+  }
+  if (sessionActive && sessionBookIndex != STATS_INVALID_BOOK && sessionBookIndex > index) {
     sessionBookIndex--;
   }
 
-  for (uint8_t i = index; i + 1 < global.bookCount; ++i) {
-    memcpy(&books[i], &books[i + 1], sizeof(BookStatEntry));
-  }
-  global.bookCount--;
-  memset(&books[global.bookCount], 0, sizeof(BookStatEntry));
+  global.bookCountTotal--;
+  global.bookCount = static_cast<uint8_t>(std::min<uint32_t>(global.bookCountTotal, 255u));
+  invalidateCache();
 
-  return save();
+  // The last record is now a duplicate of its predecessor, but load() only ever
+  // reads bookCountTotal entries so it is inert, and the next appended book
+  // overwrites it. Not worth a truncate round-trip on the SD card.
+  return saveGlobal();
 }
 
 uint32_t ReadingStatsManager::getLast7SessionsMs() const {
@@ -277,13 +471,23 @@ void ReadingStatsManager::reset() {
   global = GlobalStats{};
   global.version = STATS_FILE_VERSION;
   global.goalTarget = STATS_DEFAULT_GOAL_MINUTES;
-  memset(books, 0, sizeof(books));
+  bookIndex.clear();
+  invalidateCache();
   sessionActive = false;
-  sessionBookIndex = 0xFF;
-  save();
+  sessionBookIndex = STATS_INVALID_BOOK;
+
+  // Truncating rewrite: drops every book record along with the counters.
+  FsFile f;
+  if (!Storage.openFileForWrite("STATS", STATS_FILE_PATH, f)) {
+    LOG_ERR("STATS", "Could not open stats file to reset");
+    return;
+  }
+  f.write(&global, sizeof(GlobalStats));
+  f.flush();
+  f.close();
 }
 
 void ReadingStatsManager::setDailyGoalMinutes(uint16_t minutes) {
   global.goalTarget = minutes;
-  save();
+  saveGlobal();
 }

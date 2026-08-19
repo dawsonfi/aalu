@@ -63,7 +63,8 @@ Everything below is on top of what Seek Reader / CrossPoint already do.
 - **Deep-sleep protection** — sessions are saved on power-off, not lost.
 - **Session guarding** — 3-minute minimum prevents short peeks from polluting the stats.
 - **Self-healing progress** — finished books correctly read 100% (not 99%) across home, status bar, and stats.
-- Binary migration engine keeps `stats.bin` current across firmware upgrades (now v8, after the pet and calendar data added new fields).
+- **Every book you've read, not just the last few.** The book list is no longer capped — previously only 9 books were tracked and opening a 10th silently overwrote an existing book's stats. Rows are now paged in from the SD card as you scroll, so a large library costs a compact 16-byte-per-book index in RAM instead of a full 488-byte record each.
+- Binary migration engine keeps `stats.bin` current across firmware upgrades (now v9, which lifted the 9-book limit; v4-v8 libraries migrate in place).
 
 ### Reader experience
 - **In-reader Quick Settings overlay (Aa)** — fonts, sizes, margins, line spacing, layout — all adjusted *over* the book text. No full-screen settings round-trip, no flash hammering (writes are deferred), no E-ink ghosting.
@@ -246,7 +247,7 @@ The ESP32-C3 has **~380KB of usable RAM**, of which the E-ink framebuffer alone 
 │   └── sections/
 │       ├── 0.bin                 # per-chapter render cache (page LUT, layout, images)
 │       └── ...
-├── stats.bin                     # global + per-book reading statistics
+├── stats.bin                     # global stats header + one fixed-size record per book
 ├── home_progress.json            # fast-path home progress cache
 └── recent.json                   # the recents list (the home grid)
 ```
