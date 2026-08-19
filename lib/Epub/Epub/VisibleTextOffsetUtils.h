@@ -1,6 +1,6 @@
 #pragma once
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <vector>
 
@@ -18,9 +18,8 @@ namespace VisibleTextOffsetUtils {
 // preferFirstAtOffset stops at the first page whose start exactly equals target instead of the
 // last page in a run of equal starts (consecutive zero-width pages, e.g. image-only pages that
 // don't advance the counter) -- for landing precisely on a bookmark rather than sliding past it.
-inline std::optional<uint16_t> findPageForOffset(const std::vector<uint32_t>& pageStartOffsets,
-                                                  const uint32_t target,
-                                                  const bool preferFirstAtOffset = false) {
+inline std::optional<uint16_t> findPageForOffset(const std::vector<uint32_t>& pageStartOffsets, const uint32_t target,
+                                                 const bool preferFirstAtOffset = false) {
   std::optional<uint16_t> best;
   for (size_t page = 0; page < pageStartOffsets.size(); page++) {
     if (pageStartOffsets[page] > target) break;

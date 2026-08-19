@@ -1,6 +1,6 @@
-#include "src/activities/reader/ProgressFormat.h"
-
 #include <gtest/gtest.h>
+
+#include "src/activities/reader/ProgressFormat.h"
 
 using EpubReaderUtils::parseProgress;
 using EpubReaderUtils::serializeProgress;

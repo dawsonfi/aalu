@@ -1,6 +1,6 @@
-#include "lib/Epub/Epub/VisibleTextOffsetUtils.h"
-
 #include <gtest/gtest.h>
+
+#include "lib/Epub/Epub/VisibleTextOffsetUtils.h"
 
 using VisibleTextOffsetUtils::findPageForOffset;
 
